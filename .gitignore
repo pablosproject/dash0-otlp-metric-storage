@@ -1,0 +1,32 @@
+# Binaries
+/otlp-log-processor-backend
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+coverage.*
+*.prof
+
+# Go workspace and vendoring
+go.work
+go.work.sum
+/vendor/
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
