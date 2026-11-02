@@ -63,13 +63,14 @@ The hash decides what counts as "the same series". Every field in it splits hist
 - Keys are sorted within each attribute group. A separator byte goes between groups and fields.
 - Every string is length-prefixed, so `"ab"+"c"` and `"a"+"bc"` hash differently.
 - The same text with a different OTLP type (int `123` vs string `"123"`) gives **the same series**.
-- Array, kvlist and bytes values need a deterministic string conversion (JSON with sorted keys; base64 for bytes). Replace the current `fmt.Sprintf("%v", v)` in `anyValueToString`: the proto text format is not stable across versions.
+- Array, kvlist and bytes values keep the scaffold conversion (`fmt.Sprintf("%v", v)`). OTel SDKs send primitive metric attributes in practice, so the conversion is not changed until a real case needs it.
 
 **Algorithm:** `xxhash64` (`github.com/cespare/xxhash/v2`, already an indirect dependency) producing `UInt64`. The collision risk is about 3·10⁻⁸ at 1M series, which is accepted. A golden test pins the hash of a known input.
 
 **Consequences:**
 - The same series sent from different scopes is one series. The catalog keeps the last scope seen that day. Two datapoints with the same `MetricHash` and `TimeUnix` can exist.
 - Description changes do not split a series. The catalog keeps the last description per `(Day, MetricHash)`.
+- **Known limitation:** array, kvlist and bytes attribute values are converted with the proto text format, which is not stable across builds and keeps kvlist keys in arrival order. A series with such an attribute can get a new `MetricHash` after an upgrade, or two `MetricHash` values for the same content in a different order. This is the only accepted exception to the "never hash `%v` output" rule in `AGENTS.md`. Fix path in [§10](#10-open-questions).
 
 ### 4.2 Catalog table (`otel_metrics_series`)
 
@@ -262,6 +263,7 @@ The assignment starts from Gauge and Sum being stored correctly and asks to rest
 
 ## 10. Open questions
 
+- **Deterministic conversion of array, kvlist and bytes attributes** (e.g. JSON with sorted keys, base64 for bytes) if such attributes show up in metrics.
 - **LRU cache** (e.g. `hashicorp/golang-lru`) if `series.cache.resets` is frequent.
 - **Skip indexes / dedicated columns** for frequent attribute filters.
 - **Datapoint deduplication** to move beyond at-least-once.
