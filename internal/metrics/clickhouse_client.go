@@ -10,7 +10,7 @@ import (
 )
 
 // MetricType matches the Enum8 values of otel_metrics_series.MetricType.
-type MetricType uint8
+type MetricType int8
 
 const (
 	MetricTypeGauge MetricType = 1
@@ -39,39 +39,19 @@ type SeriesRow struct {
 	DataPointAttributes    map[string]string
 }
 
-// GaugeRow represents a single gauge data point for ClickHouse insertion.
-type GaugeRow struct {
-	ResourceAttributes    map[string]string
-	ResourceSchemaUrl     string
-	ScopeName             string
-	ScopeVersion          string
-	ScopeAttributes       map[string]string
-	ScopeDroppedAttrCount uint32
-	ScopeSchemaUrl        string
-	ServiceName           string
-	MetricName            string
-	MetricDescription     string
-	MetricUnit            string
-	Attributes            map[string]string
-	StartTimeUnix         time.Time
-	TimeUnix              time.Time
-	Value                 float64
-	Flags                 uint32
+// DatapointRow is one row of otel_metrics_gauge or otel_metrics_sum. The
+// series metadata lives in the catalog, referenced by MetricHash.
+type DatapointRow struct {
+	TimeUnix      time.Time
+	MetricHash    uint64
+	StartTimeUnix time.Time
+	Value         float64
+	Flags         uint32
 }
 
-// SumRow represents a single sum data point for ClickHouse insertion.
-type SumRow struct {
-	GaugeRow
-	AggregationTemporality int32
-	IsMonotonic            bool
-}
-
-// MetricsStore defines the interface for storing metrics in ClickHouse.
+// MetricsStore is the storage used by the Export write path.
 type MetricsStore interface {
-	CreateTables(ctx context.Context) error
-	InsertGauge(ctx context.Context, rows []GaugeRow) error
-	InsertSum(ctx context.Context, rows []SumRow) error
-	Close() error
+	Write(ctx context.Context, rows metricRows) error
 }
 
 // ClickHouseMetricsStore implements MetricsStore using a ClickHouse connection.
@@ -103,14 +83,12 @@ func NewClickHouseMetricsStore(ctx context.Context, addr string, database string
 	return &ClickHouseMetricsStore{conn: conn}, nil
 }
 
-// CreateTables executes DDL for all 5 metric tables.
+// CreateTables executes DDL for the catalog and the datapoint tables.
 func (s *ClickHouseMetricsStore) CreateTables(ctx context.Context) error {
 	ddls := []string{
+		createSeriesTableSQL,
 		createGaugeTableSQL,
 		createSumTableSQL,
-		createHistogramTableSQL,
-		createExponentialHistogramTableSQL,
-		createSummaryTableSQL,
 	}
 	for _, ddl := range ddls {
 		if err := s.conn.Exec(ctx, ddl); err != nil {
@@ -120,68 +98,82 @@ func (s *ClickHouseMetricsStore) CreateTables(ctx context.Context) error {
 	return nil
 }
 
-// InsertGauge batch-inserts gauge rows into otel_metrics_gauge.
-func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []GaugeRow) error {
-	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_gauge")
-	if err != nil {
-		return fmt.Errorf("preparing gauge batch: %w", err)
-	}
-	for _, r := range rows {
-		if err := batch.Append(
-			r.ResourceAttributes,
-			r.ResourceSchemaUrl,
-			r.ScopeName,
-			r.ScopeVersion,
-			r.ScopeAttributes,
-			r.ScopeDroppedAttrCount,
-			r.ScopeSchemaUrl,
-			r.ServiceName,
-			r.MetricName,
-			r.MetricDescription,
-			r.MetricUnit,
-			r.Attributes,
-			r.StartTimeUnix,
-			r.TimeUnix,
-			r.Value,
-			r.Flags,
-		); err != nil {
-			return fmt.Errorf("appending gauge row: %w", err)
+// Write stores the rows of one Export request. Catalog rows are inserted
+// first, so a datapoint never references a series missing from the catalog.
+// On the first failure nothing else is inserted.
+func (s *ClickHouseMetricsStore) Write(ctx context.Context, rows metricRows) error {
+	if len(rows.series) > 0 {
+		if err := s.insertSeries(ctx, rows.series); err != nil {
+			return err
 		}
 	}
-	return batch.Send()
+	if len(rows.gauges) > 0 {
+		if err := s.insertDatapoints(ctx, "otel_metrics_gauge", rows.gauges); err != nil {
+			return err
+		}
+	}
+	if len(rows.sums) > 0 {
+		if err := s.insertDatapoints(ctx, "otel_metrics_sum", rows.sums); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// InsertSum batch-inserts sum rows into otel_metrics_sum.
-func (s *ClickHouseMetricsStore) InsertSum(ctx context.Context, rows []SumRow) error {
-	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_sum")
+func (s *ClickHouseMetricsStore) insertSeries(ctx context.Context, rows []SeriesRow) error {
+	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_series")
 	if err != nil {
-		return fmt.Errorf("preparing sum batch: %w", err)
+		return fmt.Errorf("preparing series batch: %w", err)
 	}
-	for _, r := range rows {
+	for _, row := range rows {
 		if err := batch.Append(
-			r.ResourceAttributes,
-			r.ResourceSchemaUrl,
-			r.ScopeName,
-			r.ScopeVersion,
-			r.ScopeAttributes,
-			r.ScopeDroppedAttrCount,
-			r.ScopeSchemaUrl,
-			r.ServiceName,
-			r.MetricName,
-			r.MetricDescription,
-			r.MetricUnit,
-			r.Attributes,
-			r.StartTimeUnix,
-			r.TimeUnix,
-			r.Value,
-			r.Flags,
-			r.AggregationTemporality,
-			r.IsMonotonic,
+			row.Day,
+			row.MetricHash,
+			row.ServiceName,
+			row.MetricName,
+			int8(row.MetricType),
+			row.MetricUnit,
+			row.MetricDescription,
+			row.AggregationTemporality,
+			row.IsMonotonic,
+			row.ResourceAttributes,
+			row.ResourceSchemaUrl,
+			row.ScopeName,
+			row.ScopeVersion,
+			row.ScopeAttributes,
+			row.ScopeSchemaUrl,
+			row.ScopeDroppedAttrCount,
+			row.DataPointAttributes,
 		); err != nil {
-			return fmt.Errorf("appending sum row: %w", err)
+			return fmt.Errorf("appending series row: %w", err)
 		}
 	}
-	return batch.Send()
+	if err := batch.Send(); err != nil {
+		return fmt.Errorf("sending series batch: %w", err)
+	}
+	return nil
+}
+
+func (s *ClickHouseMetricsStore) insertDatapoints(ctx context.Context, table string, rows []DatapointRow) error {
+	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO "+table)
+	if err != nil {
+		return fmt.Errorf("preparing %s batch: %w", table, err)
+	}
+	for _, row := range rows {
+		if err := batch.Append(
+			row.TimeUnix,
+			row.MetricHash,
+			row.StartTimeUnix,
+			row.Value,
+			row.Flags,
+		); err != nil {
+			return fmt.Errorf("appending %s row: %w", table, err)
+		}
+	}
+	if err := batch.Send(); err != nil {
+		return fmt.Errorf("sending %s batch: %w", table, err)
+	}
+	return nil
 }
 
 // Close closes the underlying ClickHouse connection.

@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"go.opentelemetry.io/otel"
@@ -42,17 +43,8 @@ func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetr
 	metricsReceivedCounter.Add(ctx, 1)
 
 	if m.store != nil {
-		rm := request.GetResourceMetrics()
-
-		if gaugeRows := MapGaugeRows(rm); len(gaugeRows) > 0 {
-			if err := m.store.InsertGauge(ctx, gaugeRows); err != nil {
-				return nil, err
-			}
-		}
-		if sumRows := MapSumRows(rm); len(sumRows) > 0 {
-			if err := m.store.InsertSum(ctx, sumRows); err != nil {
-				return nil, err
-			}
+		if err := m.store.Write(ctx, mapExportRequest(request)); err != nil {
+			return nil, fmt.Errorf("writing metrics: %w", err)
 		}
 	}
 
