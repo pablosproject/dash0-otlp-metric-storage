@@ -1,5 +1,7 @@
 MODULE := dash0.com/otlp-log-processor-backend
 
+export CLICKHOUSE_PASSWORD ?= dash0
+
 .PHONY: build run demo query-plan test test-integration test-all fmt vet lint tidy clean
 
 build:
