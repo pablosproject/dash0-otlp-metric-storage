@@ -9,6 +9,36 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
+// MetricType matches the Enum8 values of otel_metrics_series.MetricType.
+type MetricType uint8
+
+const (
+	MetricTypeGauge MetricType = 1
+	MetricTypeSum   MetricType = 2
+)
+
+// SeriesRow is one catalog row of otel_metrics_series: the metadata of a
+// series on a given Day.
+type SeriesRow struct {
+	Day                    time.Time
+	MetricHash             uint64
+	ServiceName            string
+	MetricName             string
+	MetricType             MetricType
+	MetricUnit             string
+	MetricDescription      string
+	AggregationTemporality int32
+	IsMonotonic            bool
+	ResourceAttributes     map[string]string
+	ResourceSchemaUrl      string
+	ScopeName              string
+	ScopeVersion           string
+	ScopeAttributes        map[string]string
+	ScopeSchemaUrl         string
+	ScopeDroppedAttrCount  uint32
+	DataPointAttributes    map[string]string
+}
+
 // GaugeRow represents a single gauge data point for ClickHouse insertion.
 type GaugeRow struct {
 	ResourceAttributes    map[string]string
