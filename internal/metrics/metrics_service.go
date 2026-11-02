@@ -1,11 +1,30 @@
-package main
+package metrics
 
 import (
 	"context"
 	"log/slog"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 )
+
+const name = "dash0.com/otlp-log-processor-backend"
+
+var (
+	meter                  = otel.Meter(name)
+	metricsReceivedCounter metric.Int64Counter
+)
+
+func init() {
+	var err error
+	metricsReceivedCounter, err = meter.Int64Counter("com.dash0.homeexercise.metrics.received",
+		metric.WithDescription("The number of metrics received by otlp-metrics-processor-backend"),
+		metric.WithUnit("{metric}"))
+	if err != nil {
+		panic(err)
+	}
+}
 
 type dash0MetricsServiceServer struct {
 	addr  string
@@ -14,7 +33,7 @@ type dash0MetricsServiceServer struct {
 	colmetricspb.UnimplementedMetricsServiceServer
 }
 
-func newServer(addr string, store MetricsStore) colmetricspb.MetricsServiceServer {
+func NewServer(addr string, store MetricsStore) colmetricspb.MetricsServiceServer {
 	return &dash0MetricsServiceServer{addr: addr, store: store}
 }
 

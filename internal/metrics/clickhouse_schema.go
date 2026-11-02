@@ -1,4 +1,4 @@
-package main
+package metrics
 
 const createGaugeTableSQL = `
 CREATE TABLE IF NOT EXISTS otel_metrics_gauge (

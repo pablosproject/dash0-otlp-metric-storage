@@ -25,7 +25,7 @@ go build ./...
 
 Run the application:
 ```shell
-go run ./...
+go run .
 ```
 
 Run tests:
