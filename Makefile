@@ -1,12 +1,15 @@
 MODULE := dash0.com/otlp-log-processor-backend
 
-.PHONY: build run query-plan test test-integration test-all fmt vet lint tidy clean
+.PHONY: build run demo query-plan test test-integration test-all fmt vet lint tidy clean
 
 build:
 	go build ./...
 
 run:
 	go run .
+
+demo:
+	./scripts/demo.sh
 
 query-plan:
 	docker compose up -d --wait clickhouse
