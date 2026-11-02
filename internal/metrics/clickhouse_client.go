@@ -71,6 +71,13 @@ func NewClickHouseMetricsStore(ctx context.Context, addr string, database string
 		},
 		Settings: clickhouse.Settings{
 			"max_execution_time": 60,
+			// Every insert creates at least one part, so many small Export
+			// requests would outpace merges and fail with TOO_MANY_PARTS.
+			// ClickHouse batches them server-side instead, and waiting for the
+			// flush means Export returns OK only once the data is persisted, so
+			// client retries stay correct.
+			"async_insert":          1,
+			"wait_for_async_insert": 1,
 		},
 		DialTimeout: 5 * time.Second,
 	})

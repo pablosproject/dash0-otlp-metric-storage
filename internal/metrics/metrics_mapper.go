@@ -142,8 +142,6 @@ func numberDataPoints(metric *metricspb.Metric, base *CatalogRow) (datapoints []
 	}
 }
 
-// addDatapoint adds the datapoint row and the catalog row of its series. The
-// catalog keeps one row per (Day, MetricHash): the last one seen wins.
 func (m *rowMapper) addDatapoint(catalogRow CatalogRow, datapoint *metricspb.NumberDataPoint) {
 	catalogRow.DataPointAttributes = kvToMap(datapoint.GetAttributes())
 	catalogRow.MetricHash = metricHash(&catalogRow)

@@ -1,0 +1,13 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.2
+    ports:
+      - "9000:9000"
+      - "8123:8123"
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-dash0}
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144

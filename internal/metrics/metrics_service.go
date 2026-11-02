@@ -50,10 +50,8 @@ func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetr
 	slog.DebugContext(ctx, "Received ExportMetricsServiceRequest")
 	metricsReceivedCounter.Add(ctx, 1)
 
-	if m.store != nil {
-		if err := m.writeRows(ctx, mapExportRequest(request)); err != nil {
-			return nil, fmt.Errorf("writing metrics: %w", err)
-		}
+	if err := m.writeRows(ctx, mapExportRequest(request)); err != nil {
+		return nil, fmt.Errorf("writing metrics: %w", err)
 	}
 
 	return &colmetricspb.ExportMetricsServiceResponse{}, nil
