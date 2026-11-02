@@ -80,6 +80,10 @@ type seriesKey struct {
 	metricHash uint64
 }
 
+func (row SeriesRow) seriesKey() seriesKey {
+	return seriesKey{dayUnix: row.Day.Unix(), metricHash: row.MetricHash}
+}
+
 type rowMapper struct {
 	rows        metricRows
 	seriesIndex map[seriesKey]int
@@ -146,7 +150,7 @@ func (m *rowMapper) addDatapoint(series SeriesRow, datapoint *metricspb.NumberDa
 	timeUnix := nanosToTime(datapoint.GetTimeUnixNano())
 	series.Day = utcDay(timeUnix)
 
-	key := seriesKey{dayUnix: series.Day.Unix(), metricHash: series.MetricHash}
+	key := series.seriesKey()
 	if i, ok := m.seriesIndex[key]; ok {
 		m.rows.series[i] = series
 	} else {

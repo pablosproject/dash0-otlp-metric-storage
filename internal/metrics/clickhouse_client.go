@@ -51,7 +51,8 @@ type DatapointRow struct {
 
 // MetricsStore is the storage used by the Export write path.
 type MetricsStore interface {
-	Write(ctx context.Context, rows metricRows) error
+	InsertSeries(ctx context.Context, rows []SeriesRow) error
+	InsertDatapoints(ctx context.Context, gauges []DatapointRow, sums []DatapointRow) error
 }
 
 // ClickHouseMetricsStore implements MetricsStore using a ClickHouse connection.
@@ -98,29 +99,17 @@ func (s *ClickHouseMetricsStore) CreateTables(ctx context.Context) error {
 	return nil
 }
 
-// Write stores the rows of one Export request. Catalog rows are inserted
-// first, so a datapoint never references a series missing from the catalog.
-// On the first failure nothing else is inserted.
-func (s *ClickHouseMetricsStore) Write(ctx context.Context, rows metricRows) error {
-	if len(rows.series) > 0 {
-		if err := s.insertSeries(ctx, rows.series); err != nil {
-			return err
-		}
+func (s *ClickHouseMetricsStore) InsertDatapoints(ctx context.Context, gauges []DatapointRow, sums []DatapointRow) error {
+	if err := s.insertDatapoints(ctx, "otel_metrics_gauge", gauges); err != nil {
+		return err
 	}
-	if len(rows.gauges) > 0 {
-		if err := s.insertDatapoints(ctx, "otel_metrics_gauge", rows.gauges); err != nil {
-			return err
-		}
-	}
-	if len(rows.sums) > 0 {
-		if err := s.insertDatapoints(ctx, "otel_metrics_sum", rows.sums); err != nil {
-			return err
-		}
-	}
-	return nil
+	return s.insertDatapoints(ctx, "otel_metrics_sum", sums)
 }
 
-func (s *ClickHouseMetricsStore) insertSeries(ctx context.Context, rows []SeriesRow) error {
+func (s *ClickHouseMetricsStore) InsertSeries(ctx context.Context, rows []SeriesRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
 	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_series")
 	if err != nil {
 		return fmt.Errorf("preparing series batch: %w", err)
@@ -155,6 +144,9 @@ func (s *ClickHouseMetricsStore) insertSeries(ctx context.Context, rows []Series
 }
 
 func (s *ClickHouseMetricsStore) insertDatapoints(ctx context.Context, table string, rows []DatapointRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
 	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO "+table)
 	if err != nil {
 		return fmt.Errorf("preparing %s batch: %w", table, err)

@@ -122,7 +122,7 @@ func TestInsertSeries(t *testing.T) {
 		ScopeDroppedAttrCount:  3,
 		DataPointAttributes:    map[string]string{"method": "GET"},
 	}
-	if err := store.insertSeries(ctx, []SeriesRow{want}); err != nil {
+	if err := store.InsertSeries(ctx, []SeriesRow{want}); err != nil {
 		t.Fatalf("inserting series rows: %v", err)
 	}
 

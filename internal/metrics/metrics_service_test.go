@@ -2,9 +2,13 @@ package metrics
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"net"
+	"slices"
 	"testing"
+	"time"
 
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	otelmetrics "go.opentelemetry.io/proto/otlp/metrics/v1"
@@ -95,4 +99,77 @@ func server() (colmetricspb.MetricsServiceClient, func()) {
 	client := colmetricspb.NewMetricsServiceClient(conn)
 
 	return client, closer
+}
+
+// fakeStore records the inserts it receives, e.g. "series:2", "datapoints:1+1".
+type fakeStore struct {
+	calls         []string
+	seriesErr     error
+	datapointsErr error
+}
+
+func (s *fakeStore) InsertSeries(_ context.Context, rows []SeriesRow) error {
+	s.calls = append(s.calls, fmt.Sprintf("series:%d", len(rows)))
+	return s.seriesErr
+}
+
+func (s *fakeStore) InsertDatapoints(_ context.Context, gauges []DatapointRow, sums []DatapointRow) error {
+	s.calls = append(s.calls, fmt.Sprintf("datapoints:%d+%d", len(gauges), len(sums)))
+	return s.datapointsErr
+}
+
+func TestExport_WritePath(t *testing.T) {
+	errClickHouse := errors.New("clickhouse unavailable")
+
+	type exportStep struct {
+		seriesErr     error
+		datapointsErr error
+		wantErr       bool
+		wantCalls     []string
+	}
+
+	tests := map[string][]exportStep{
+		"catalog is written before datapoints": {
+			{wantCalls: []string{"series:2", "datapoints:1+1"}},
+		},
+		"known series are not rewritten to the catalog": {
+			{wantCalls: []string{"series:2", "datapoints:1+1"}},
+			{wantCalls: []string{"series:0", "datapoints:1+1"}},
+		},
+		"catalog failure inserts no datapoints and does not cache the series": {
+			{seriesErr: errClickHouse, wantErr: true, wantCalls: []string{"series:2"}},
+			{wantCalls: []string{"series:2", "datapoints:1+1"}},
+		},
+		"datapoint failure keeps the series cached": {
+			{datapointsErr: errClickHouse, wantErr: true, wantCalls: []string{"series:2", "datapoints:1+1"}},
+			{wantCalls: []string{"series:0", "datapoints:1+1"}},
+		},
+	}
+
+	now := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
+	request := exportRequest(resourceMetrics("api", scopeMetrics("lib",
+		gaugeMetric("cpu.utilization", numberDataPoint(now, 0.5)),
+		sumMetric("http.requests", numberDataPoint(now, 7)),
+	)))
+
+	for name, steps := range tests {
+		t.Run(name, func(t *testing.T) {
+			store := &fakeStore{}
+			server := NewServer("test", store)
+
+			for i, step := range steps {
+				store.calls = nil
+				store.seriesErr = step.seriesErr
+				store.datapointsErr = step.datapointsErr
+
+				_, err := server.Export(context.Background(), request)
+				if (err != nil) != step.wantErr {
+					t.Fatalf("export %d: got error %v, want error: %t", i, err, step.wantErr)
+				}
+				if !slices.Equal(store.calls, step.wantCalls) {
+					t.Errorf("export %d: got calls %v, want %v", i, store.calls, step.wantCalls)
+				}
+			}
+		})
+	}
 }

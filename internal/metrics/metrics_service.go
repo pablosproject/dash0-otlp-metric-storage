@@ -27,15 +27,23 @@ func init() {
 	}
 }
 
+// defaultSeriesCacheMaxSize bounds the catalog cache to a few MB of keys.
+const defaultSeriesCacheMaxSize = 100_000
+
 type dash0MetricsServiceServer struct {
-	addr  string
-	store MetricsStore
+	addr        string
+	store       MetricsStore
+	seriesCache *seriesCache
 
 	colmetricspb.UnimplementedMetricsServiceServer
 }
 
 func NewServer(addr string, store MetricsStore) colmetricspb.MetricsServiceServer {
-	return &dash0MetricsServiceServer{addr: addr, store: store}
+	return &dash0MetricsServiceServer{
+		addr:        addr,
+		store:       store,
+		seriesCache: newSeriesCache(defaultSeriesCacheMaxSize),
+	}
 }
 
 func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetricspb.ExportMetricsServiceRequest) (*colmetricspb.ExportMetricsServiceResponse, error) {
@@ -43,10 +51,32 @@ func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetr
 	metricsReceivedCounter.Add(ctx, 1)
 
 	if m.store != nil {
-		if err := m.store.Write(ctx, mapExportRequest(request)); err != nil {
+		if err := m.writeRows(ctx, mapExportRequest(request)); err != nil {
 			return nil, fmt.Errorf("writing metrics: %w", err)
 		}
 	}
 
 	return &colmetricspb.ExportMetricsServiceResponse{}, nil
+}
+
+// writeRows inserts catalog rows before the datapoints that reference them,
+// so a datapoint never references a series missing from the catalog. If the
+// catalog insert fails, no datapoints are inserted and the cache is unchanged.
+func (m *dash0MetricsServiceServer) writeRows(ctx context.Context, rows metricRows) error {
+	var newSeries []SeriesRow
+	for _, row := range rows.series {
+		if !m.seriesCache.has(row.seriesKey()) {
+			newSeries = append(newSeries, row)
+		}
+	}
+	if err := m.store.InsertSeries(ctx, newSeries); err != nil {
+		return fmt.Errorf("inserting catalog rows: %w", err)
+	}
+	for _, row := range newSeries {
+		m.seriesCache.add(row.seriesKey())
+	}
+	if err := m.store.InsertDatapoints(ctx, rows.gauges, rows.sums); err != nil {
+		return fmt.Errorf("inserting datapoints: %w", err)
+	}
+	return nil
 }
