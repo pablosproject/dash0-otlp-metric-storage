@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"maps"
 	"testing"
 	"time"
 
@@ -81,6 +82,24 @@ func sumMetric(name string, dps ...*metricspb.NumberDataPoint) *metricspb.Metric
 	}
 }
 
+func histogramMetric(name string, datapointCount int) *metricspb.Metric {
+	return &metricspb.Metric{Name: name, Data: &metricspb.Metric_Histogram{Histogram: &metricspb.Histogram{
+		DataPoints: make([]*metricspb.HistogramDataPoint, datapointCount),
+	}}}
+}
+
+func exponentialHistogramMetric(name string, datapointCount int) *metricspb.Metric {
+	return &metricspb.Metric{Name: name, Data: &metricspb.Metric_ExponentialHistogram{ExponentialHistogram: &metricspb.ExponentialHistogram{
+		DataPoints: make([]*metricspb.ExponentialHistogramDataPoint, datapointCount),
+	}}}
+}
+
+func summaryMetric(name string, datapointCount int) *metricspb.Metric {
+	return &metricspb.Metric{Name: name, Data: &metricspb.Metric_Summary{Summary: &metricspb.Summary{
+		DataPoints: make([]*metricspb.SummaryDataPoint, datapointCount),
+	}}}
+}
+
 func scopeMetrics(scopeName string, metrics ...*metricspb.Metric) *metricspb.ScopeMetrics {
 	return &metricspb.ScopeMetrics{
 		Scope:   &commonpb.InstrumentationScope{Name: scopeName},
@@ -159,6 +178,7 @@ func TestMapExportRequest_CatalogRows(t *testing.T) {
 		in              []*metricspb.ResourceMetrics
 		wantCatalogRows int
 		wantGauges      int
+		wantRejected    map[string]int64
 	}{
 		"same series on the same day gives one catalog row": {
 			in: []*metricspb.ResourceMetrics{resourceMetrics("api", scopeMetrics("lib",
@@ -189,14 +209,30 @@ func TestMapExportRequest_CatalogRows(t *testing.T) {
 			wantCatalogRows: 2,
 			wantGauges:      2,
 		},
-		"unsupported metric types are skipped": {
+		"unsupported metric types are rejected and counted by type": {
 			in: []*metricspb.ResourceMetrics{resourceMetrics("api", scopeMetrics("lib",
-				&metricspb.Metric{Name: "latency", Data: &metricspb.Metric_Histogram{Histogram: &metricspb.Histogram{
-					DataPoints: []*metricspb.HistogramDataPoint{{TimeUnixNano: uint64(midday.UnixNano())}},
-				}}},
+				histogramMetric("latency", 2),
+				exponentialHistogramMetric("size", 1),
+				summaryMetric("duration", 3),
+				histogramMetric("other.latency", 1),
 			))},
 			wantCatalogRows: 0,
 			wantGauges:      0,
+			wantRejected:    map[string]int64{"histogram": 3, "exponential_histogram": 1, "summary": 3},
+		},
+		"supported datapoints are kept next to rejected ones": {
+			in: []*metricspb.ResourceMetrics{resourceMetrics("api", scopeMetrics("lib",
+				gaugeMetric("cpu", numberDataPoint(midday, 1)),
+				histogramMetric("latency", 2),
+			))},
+			wantCatalogRows: 1,
+			wantGauges:      1,
+			wantRejected:    map[string]int64{"histogram": 2},
+		},
+		"metric without data rejects nothing": {
+			in: []*metricspb.ResourceMetrics{resourceMetrics("api", scopeMetrics("lib",
+				&metricspb.Metric{Name: "empty"},
+			))},
 		},
 	}
 
@@ -205,6 +241,9 @@ func TestMapExportRequest_CatalogRows(t *testing.T) {
 			rows := mapExportRequest(exportRequest(tt.in...))
 			if len(rows.catalog) != tt.wantCatalogRows || len(rows.gauges) != tt.wantGauges {
 				t.Errorf("got %d catalog rows and %d gauges, want %d and %d", len(rows.catalog), len(rows.gauges), tt.wantCatalogRows, tt.wantGauges)
+			}
+			if !maps.Equal(rows.rejectedDatapoints, tt.wantRejected) {
+				t.Errorf("got rejected datapoints %v, want %v", rows.rejectedDatapoints, tt.wantRejected)
 			}
 		})
 	}

@@ -269,4 +269,5 @@ The assignment starts from Gauge and Sum being stored correctly and asks to rest
 - **LRU cache** (e.g. `hashicorp/golang-lru`) if `catalog.cache.resets` is frequent.
 - **Skip indexes / dedicated columns** for frequent attribute filters.
 - **Datapoint deduplication** to move beyond at-least-once.
+- **Classifying ClickHouse errors:** every store error is returned as `Unavailable`, so permanent errors (e.g. `UNKNOWN_TABLE`, `TYPE_MISMATCH`) are retried until the client gives up. Mapping them to a non-retryable code (`Internal`) needs a maintained list of ClickHouse error codes; a wrong entry would drop data that a retry would have stored.
 - **Observability** section to be detailed further.

@@ -11,69 +11,86 @@ import (
 	"time"
 
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
-	otelmetrics "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 )
 
-func TestMetricsServiceServer_Export(t *testing.T) {
-	ctx := context.Background()
-
-	client, closer := server()
-	defer closer()
-
-	type expectation struct {
-		out *colmetricspb.ExportMetricsServiceResponse
-		err error
-	}
+func TestExport_StatusAndPartialSuccess(t *testing.T) {
+	now := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
+	supportedOnly := exportRequest(resourceMetrics("api", scopeMetrics("lib",
+		gaugeMetric("cpu.utilization", numberDataPoint(now, 0.5)),
+	)))
+	withUnsupported := exportRequest(resourceMetrics("api", scopeMetrics("lib",
+		gaugeMetric("cpu.utilization", numberDataPoint(now, 0.5)),
+		histogramMetric("http.server.request.duration", 3),
+		summaryMetric("rpc.duration", 1),
+	)))
 
 	tests := map[string]struct {
-		in       *colmetricspb.ExportMetricsServiceRequest
-		expected expectation
+		request          *colmetricspb.ExportMetricsServiceRequest
+		storeErr         error
+		wantCode         codes.Code
+		wantRejected     int64
+		wantErrorMessage string
 	}{
-		"Must_Success": {
-			in: &colmetricspb.ExportMetricsServiceRequest{
-				ResourceMetrics: []*otelmetrics.ResourceMetrics{
-					{
-						ScopeMetrics: []*otelmetrics.ScopeMetrics{},
-						SchemaUrl:    "dash0.com/otlp-metrics-processor-backend",
-					},
-				},
-			},
-			expected: expectation{
-				out: &colmetricspb.ExportMetricsServiceResponse{},
-				err: nil,
-			},
+		"supported metrics only": {
+			request:  supportedOnly,
+			wantCode: codes.OK,
+		},
+		"empty request": {
+			request:  exportRequest(),
+			wantCode: codes.OK,
+		},
+		"unsupported metric types give partial success": {
+			request:          withUnsupported,
+			wantCode:         codes.OK,
+			wantRejected:     4,
+			wantErrorMessage: "unsupported metric types (only Gauge and Sum are stored): histogram=3, summary=1",
+		},
+		"clickhouse error is retryable": {
+			request:  supportedOnly,
+			storeErr: errors.New("connection refused"),
+			wantCode: codes.Unavailable,
+		},
+		"deadline exceeded": {
+			request:  supportedOnly,
+			storeErr: fmt.Errorf("sending batch: %w", context.DeadlineExceeded),
+			wantCode: codes.DeadlineExceeded,
+		},
+		"canceled": {
+			request:  supportedOnly,
+			storeErr: fmt.Errorf("sending batch: %w", context.Canceled),
+			wantCode: codes.Canceled,
 		},
 	}
 
-	for scenario, tt := range tests {
-		t.Run(scenario, func(t *testing.T) {
-			out, err := client.Export(ctx, tt.in)
-			if err != nil {
-				if tt.expected.err.Error() != err.Error() {
-					t.Errorf("Err -> \nWant: %q\nGot: %q\n", tt.expected.err, err)
-				}
-			} else {
-				expectedPartialSuccess := tt.expected.out.GetPartialSuccess()
-				if expectedPartialSuccess.GetRejectedDataPoints() != out.GetPartialSuccess().GetRejectedDataPoints() ||
-					expectedPartialSuccess.GetErrorMessage() != out.GetPartialSuccess().GetErrorMessage() {
-					t.Errorf("Out -> \nWant: %q\nGot : %q", tt.expected.out, out)
-				}
-			}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			client, closer := server(&fakeStore{catalogErr: tt.storeErr})
+			defer closer()
 
+			response, err := client.Export(context.Background(), tt.request)
+			if got := status.Code(err); got != tt.wantCode {
+				t.Fatalf("got code %v (%v), want %v", got, err, tt.wantCode)
+			}
+			partialSuccess := response.GetPartialSuccess()
+			if partialSuccess.GetRejectedDataPoints() != tt.wantRejected || partialSuccess.GetErrorMessage() != tt.wantErrorMessage {
+				t.Errorf("got partial success %v, want rejected %d and message %q", partialSuccess, tt.wantRejected, tt.wantErrorMessage)
+			}
 		})
 	}
 }
 
-func server() (colmetricspb.MetricsServiceClient, func()) {
+func server(store MetricsStore) (colmetricspb.MetricsServiceClient, func()) {
 	addr := "localhost:4317"
 	buffer := 101024 * 1024
 	lis := bufconn.Listen(buffer)
 
 	baseServer := grpc.NewServer()
-	colmetricspb.RegisterMetricsServiceServer(baseServer, NewServer(addr, &fakeStore{}))
+	colmetricspb.RegisterMetricsServiceServer(baseServer, NewServer(addr, store))
 	go func() {
 		if err := baseServer.Serve(lis); err != nil {
 			log.Printf("error serving server: %v", err)

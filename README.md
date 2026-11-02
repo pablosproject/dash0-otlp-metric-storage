@@ -10,7 +10,9 @@ A gRPC backend that receives OpenTelemetry metrics (OTLP) and stores them in Cli
 - **Storage:** Gauge and Sum datapoints are stored as lean rows (`otel_metrics_gauge`, `otel_metrics_sum`) that reference the series catalog (`otel_metrics_catalog`) by `MetricHash`. Catalog rows are written before the datapoints. Covered by unit and integration tests.
 - **Catalog cache:** each instance writes a series to the catalog once per day; known `(Day, MetricHash)` keys are skipped. The cache is updated only after a successful catalog insert.
 - **Async inserts:** ClickHouse batches small inserts server-side; `Export` returns only once the data is persisted. See [Async inserts](#async-inserts).
-- **Not implemented yet** (see the ADR): gRPC status codes and partial success, domain observability.
+- **gRPC status codes:** storage errors are returned as `Unavailable`, `DeadlineExceeded` or `Canceled`, which OTLP clients retry. The error detail is logged, not sent to the client.
+- **Partial success:** unsupported metric types (histogram, exponential histogram, summary) are not stored; `Export` returns OK with `partial_success.rejected_data_points` and the count per type.
+- **Not implemented yet** (see the ADR): domain observability.
 
 ## Requirements
 

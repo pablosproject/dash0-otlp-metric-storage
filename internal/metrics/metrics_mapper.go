@@ -73,6 +73,8 @@ type metricRows struct {
 	catalog []CatalogRow
 	gauges  []DatapointRow
 	sums    []DatapointRow
+	// rejectedDatapoints counts unsupported datapoints by metric type, e.g. "histogram".
+	rejectedDatapoints map[string]int64
 }
 
 type catalogKey struct {
@@ -90,7 +92,10 @@ type rowMapper struct {
 }
 
 func mapExportRequest(request *colmetricspb.ExportMetricsServiceRequest) metricRows {
-	m := rowMapper{catalogIndex: make(map[catalogKey]int)}
+	m := rowMapper{
+		rows:         metricRows{rejectedDatapoints: make(map[string]int64)},
+		catalogIndex: make(map[catalogKey]int),
+	}
 
 	for _, resourceMetrics := range request.GetResourceMetrics() {
 		serviceName := resourceServiceName(resourceMetrics.GetResource())
@@ -116,6 +121,9 @@ func mapExportRequest(request *colmetricspb.ExportMetricsServiceRequest) metricR
 				}
 				datapoints, ok := numberDataPoints(metric, &base)
 				if !ok {
+					if metricType, count := unsupportedDatapoints(metric); count > 0 {
+						m.rows.rejectedDatapoints[metricType] += int64(count)
+					}
 					continue
 				}
 				for _, datapoint := range datapoints {
@@ -125,6 +133,19 @@ func mapExportRequest(request *colmetricspb.ExportMetricsServiceRequest) metricR
 		}
 	}
 	return m.rows
+}
+
+func unsupportedDatapoints(metric *metricspb.Metric) (metricType string, count int) {
+	switch data := metric.GetData().(type) {
+	case *metricspb.Metric_Histogram:
+		return "histogram", len(data.Histogram.GetDataPoints())
+	case *metricspb.Metric_ExponentialHistogram:
+		return "exponential_histogram", len(data.ExponentialHistogram.GetDataPoints())
+	case *metricspb.Metric_Summary:
+		return "summary", len(data.Summary.GetDataPoints())
+	default:
+		return "", 0
+	}
 }
 
 func numberDataPoints(metric *metricspb.Metric, base *CatalogRow) (datapoints []*metricspb.NumberDataPoint, ok bool) {
