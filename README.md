@@ -7,9 +7,8 @@ A gRPC backend that receives OpenTelemetry metrics (OTLP) and stores them in Cli
 
 ## Current state
 
-- **Scaffold:** a gRPC endpoint receives metrics; Gauge and Sum datapoints are converted to denormalized rows and inserted into ClickHouse. Covered by unit and integration tests.
-- **Design:** the split into a series catalog and lean datapoint tables is decided in the ADR.
-- **Implementation:** not started yet.
+- **Storage:** Gauge and Sum datapoints are stored as lean rows (`otel_metrics_gauge`, `otel_metrics_sum`) that reference the series catalog (`otel_metrics_series`) by `MetricHash`. Catalog rows are written before the datapoints. Covered by unit and integration tests.
+- **Not implemented yet** (see the ADR): catalog cache, gRPC status codes and partial success, async inserts, ClickHouse wiring in `main.go`, domain observability.
 
 ## Requirements
 

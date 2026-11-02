@@ -139,6 +139,7 @@ ORDER BY (toStartOfHour(TimeUnix, 'UTC'), MetricHash, TimeUnix)
   The chosen key groups rows by hour, then by series, then by time. A time-only query reads only the matching hours, because `toStartOfHour` is monotonic and a filter on `TimeUnix` uses the first key column. A series + time query jumps to the series block inside each hour. Values of one series are contiguous inside each hour, so they compress well.
 - **Partition vs sort key.** The daily partition prunes whole days without opening their files. The hour bucket prunes granules inside a day. Hourly *partitions* would multiply parts (every insert creates at least one part per partition touched, and parts of different partitions never merge), which hurts compression and risks `TOO_MANY_PARTS`.
 - The bucket size is tunable. Verify with `EXPLAIN indexes = 1`.
+- **Known limitation:** `as_int` values are stored in `Value Float64`, like the scaffold and the OpenTelemetry ClickHouse exporter. Integers above 2⁵³ lose precision, e.g. long-running cumulative byte counters. A separate `Int64` column would keep them exact, at the cost of a wider schema and queries that must pick the right column.
 
 ## 5. Ingestion
 
