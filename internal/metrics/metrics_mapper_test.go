@@ -44,7 +44,7 @@ func TestAnyValueToString(t *testing.T) {
 }
 
 func TestKvToMap_SameTextDifferentTypeIsSameSeries(t *testing.T) {
-	a, b := baseSeriesRow(), baseSeriesRow()
+	a, b := baseCatalogRow(), baseCatalogRow()
 	a.DataPointAttributes = kvToMap([]*commonpb.KeyValue{kv("cpu", intVal(1))})
 	b.DataPointAttributes = kvToMap([]*commonpb.KeyValue{kv("cpu", strVal("1"))})
 	if metricHash(&a) != metricHash(&b) {
@@ -110,11 +110,11 @@ func TestMapExportRequest_GaugeAndSum(t *testing.T) {
 		)),
 	))
 
-	if len(rows.series) != 2 || len(rows.gauges) != 1 || len(rows.sums) != 1 {
-		t.Fatalf("got %d series, %d gauges, %d sums; want 2, 1, 1", len(rows.series), len(rows.gauges), len(rows.sums))
+	if len(rows.catalog) != 2 || len(rows.gauges) != 1 || len(rows.sums) != 1 {
+		t.Fatalf("got %d catalog rows, %d gauges, %d sums; want 2, 1, 1", len(rows.catalog), len(rows.gauges), len(rows.sums))
 	}
 
-	gaugeSeries, sumSeries := rows.series[0], rows.series[1]
+	gaugeSeries, sumSeries := rows.catalog[0], rows.catalog[1]
 	wantDay := time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC)
 
 	if gaugeSeries.MetricType != MetricTypeGauge || gaugeSeries.AggregationTemporality != 0 || gaugeSeries.IsMonotonic {
@@ -123,7 +123,7 @@ func TestMapExportRequest_GaugeAndSum(t *testing.T) {
 	if sumSeries.MetricType != MetricTypeSum || sumSeries.AggregationTemporality != 2 || !sumSeries.IsMonotonic {
 		t.Errorf("unexpected sum series type fields: %+v", sumSeries)
 	}
-	for _, s := range rows.series {
+	for _, s := range rows.catalog {
 		if !s.Day.Equal(wantDay) {
 			t.Errorf("series %s: got Day %v, want %v", s.MetricName, s.Day, wantDay)
 		}
@@ -156,38 +156,38 @@ func TestMapExportRequest_CatalogRows(t *testing.T) {
 	afterMidnight := time.Date(2026, 3, 11, 0, 0, 1, 0, time.UTC)
 
 	tests := map[string]struct {
-		in         []*metricspb.ResourceMetrics
-		wantSeries int
-		wantGauges int
+		in              []*metricspb.ResourceMetrics
+		wantCatalogRows int
+		wantGauges      int
 	}{
 		"same series on the same day gives one catalog row": {
 			in: []*metricspb.ResourceMetrics{resourceMetrics("api", scopeMetrics("lib",
 				gaugeMetric("cpu", numberDataPoint(midday, 1), numberDataPoint(midday.Add(time.Second), 2), numberDataPoint(beforeMidnight, 3)),
 			))},
-			wantSeries: 1,
-			wantGauges: 3,
+			wantCatalogRows: 1,
+			wantGauges:      3,
 		},
 		"datapoints across UTC midnight give one catalog row per day": {
 			in: []*metricspb.ResourceMetrics{resourceMetrics("api", scopeMetrics("lib",
 				gaugeMetric("cpu", numberDataPoint(beforeMidnight, 1), numberDataPoint(afterMidnight, 2)),
 			))},
-			wantSeries: 2,
-			wantGauges: 2,
+			wantCatalogRows: 2,
+			wantGauges:      2,
 		},
 		"different datapoint attributes give different series": {
 			in: []*metricspb.ResourceMetrics{resourceMetrics("api", scopeMetrics("lib",
 				gaugeMetric("cpu", numberDataPoint(midday, 1, kv("cpu", intVal(0))), numberDataPoint(midday, 2, kv("cpu", intVal(1)))),
 			))},
-			wantSeries: 2,
-			wantGauges: 2,
+			wantCatalogRows: 2,
+			wantGauges:      2,
 		},
 		"different resources give different series": {
 			in: []*metricspb.ResourceMetrics{
 				resourceMetrics("api", scopeMetrics("lib", gaugeMetric("cpu", numberDataPoint(midday, 1)))),
 				resourceMetrics("worker", scopeMetrics("lib", gaugeMetric("cpu", numberDataPoint(midday, 1)))),
 			},
-			wantSeries: 2,
-			wantGauges: 2,
+			wantCatalogRows: 2,
+			wantGauges:      2,
 		},
 		"unsupported metric types are skipped": {
 			in: []*metricspb.ResourceMetrics{resourceMetrics("api", scopeMetrics("lib",
@@ -195,16 +195,16 @@ func TestMapExportRequest_CatalogRows(t *testing.T) {
 					DataPoints: []*metricspb.HistogramDataPoint{{TimeUnixNano: uint64(midday.UnixNano())}},
 				}}},
 			))},
-			wantSeries: 0,
-			wantGauges: 0,
+			wantCatalogRows: 0,
+			wantGauges:      0,
 		},
 	}
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			rows := mapExportRequest(exportRequest(tt.in...))
-			if len(rows.series) != tt.wantSeries || len(rows.gauges) != tt.wantGauges {
-				t.Errorf("got %d series and %d gauges, want %d and %d", len(rows.series), len(rows.gauges), tt.wantSeries, tt.wantGauges)
+			if len(rows.catalog) != tt.wantCatalogRows || len(rows.gauges) != tt.wantGauges {
+				t.Errorf("got %d catalog rows and %d gauges, want %d and %d", len(rows.catalog), len(rows.gauges), tt.wantCatalogRows, tt.wantGauges)
 			}
 		})
 	}
@@ -221,10 +221,10 @@ func TestMapExportRequest_LastCatalogRowWins(t *testing.T) {
 		resourceMetrics("api", scopeMetrics("lib-a", first), scopeMetrics("lib-b", second)),
 	))
 
-	if len(rows.series) != 1 {
-		t.Fatalf("got %d catalog rows, want 1", len(rows.series))
+	if len(rows.catalog) != 1 {
+		t.Fatalf("got %d catalog rows, want 1", len(rows.catalog))
 	}
-	if got := rows.series[0]; got.ScopeName != "lib-b" || got.MetricDescription != "new" {
+	if got := rows.catalog[0]; got.ScopeName != "lib-b" || got.MetricDescription != "new" {
 		t.Errorf("got ScopeName %q, MetricDescription %q; want lib-b, new", got.ScopeName, got.MetricDescription)
 	}
 	if len(rows.gauges) != 2 {

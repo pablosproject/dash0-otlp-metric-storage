@@ -9,7 +9,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
-// MetricType matches the Enum8 values of otel_metrics_series.MetricType.
+// MetricType matches the Enum8 values of otel_metrics_catalog.MetricType.
 type MetricType int8
 
 const (
@@ -17,9 +17,9 @@ const (
 	MetricTypeSum   MetricType = 2
 )
 
-// SeriesRow is one catalog row of otel_metrics_series: the metadata of a
+// CatalogRow is one catalog row of otel_metrics_catalog: the metadata of a
 // series on a given Day.
-type SeriesRow struct {
+type CatalogRow struct {
 	Day                    time.Time
 	MetricHash             uint64
 	ServiceName            string
@@ -51,7 +51,7 @@ type DatapointRow struct {
 
 // MetricsStore is the storage used by the Export write path.
 type MetricsStore interface {
-	InsertSeries(ctx context.Context, rows []SeriesRow) error
+	InsertCatalogRows(ctx context.Context, rows []CatalogRow) error
 	InsertDatapoints(ctx context.Context, gauges []DatapointRow, sums []DatapointRow) error
 }
 
@@ -87,7 +87,7 @@ func NewClickHouseMetricsStore(ctx context.Context, addr string, database string
 // CreateTables executes DDL for the catalog and the datapoint tables.
 func (s *ClickHouseMetricsStore) CreateTables(ctx context.Context) error {
 	ddls := []string{
-		createSeriesTableSQL,
+		createCatalogTableSQL,
 		createGaugeTableSQL,
 		createSumTableSQL,
 	}
@@ -106,13 +106,13 @@ func (s *ClickHouseMetricsStore) InsertDatapoints(ctx context.Context, gauges []
 	return s.insertDatapoints(ctx, "otel_metrics_sum", sums)
 }
 
-func (s *ClickHouseMetricsStore) InsertSeries(ctx context.Context, rows []SeriesRow) error {
+func (s *ClickHouseMetricsStore) InsertCatalogRows(ctx context.Context, rows []CatalogRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
-	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_series")
+	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_catalog")
 	if err != nil {
-		return fmt.Errorf("preparing series batch: %w", err)
+		return fmt.Errorf("preparing catalog batch: %w", err)
 	}
 	for _, row := range rows {
 		if err := batch.Append(
@@ -134,11 +134,11 @@ func (s *ClickHouseMetricsStore) InsertSeries(ctx context.Context, rows []Series
 			row.ScopeDroppedAttrCount,
 			row.DataPointAttributes,
 		); err != nil {
-			return fmt.Errorf("appending series row: %w", err)
+			return fmt.Errorf("appending catalog row: %w", err)
 		}
 	}
 	if err := batch.Send(); err != nil {
-		return fmt.Errorf("sending series batch: %w", err)
+		return fmt.Errorf("sending catalog batch: %w", err)
 	}
 	return nil
 }

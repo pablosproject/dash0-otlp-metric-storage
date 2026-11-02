@@ -14,7 +14,7 @@ const fieldSeparator byte = 0xff
 // Only identity fields are hashed (see ADR §4.1): Scope, schema URLs,
 // MetricDescription and ServiceName are ignored. Changing the encoding changes
 // every MetricHash and splits the history of all series.
-func metricHash(r *SeriesRow) uint64 {
+func metricHash(r *CatalogRow) uint64 {
 	b := make([]byte, 0, 256)
 	b = appendString(b, r.MetricName)
 	b = append(b, fieldSeparator)

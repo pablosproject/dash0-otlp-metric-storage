@@ -27,22 +27,22 @@ func init() {
 	}
 }
 
-// defaultSeriesCacheMaxSize bounds the catalog cache to a few MB of keys.
-const defaultSeriesCacheMaxSize = 100_000
+// defaultCatalogCacheMaxSize bounds the catalog cache to a few MB of keys.
+const defaultCatalogCacheMaxSize = 100_000
 
 type dash0MetricsServiceServer struct {
-	addr        string
-	store       MetricsStore
-	seriesCache *seriesCache
+	addr         string
+	store        MetricsStore
+	catalogCache *catalogCache
 
 	colmetricspb.UnimplementedMetricsServiceServer
 }
 
 func NewServer(addr string, store MetricsStore) colmetricspb.MetricsServiceServer {
 	return &dash0MetricsServiceServer{
-		addr:        addr,
-		store:       store,
-		seriesCache: newSeriesCache(defaultSeriesCacheMaxSize),
+		addr:         addr,
+		store:        store,
+		catalogCache: newCatalogCache(defaultCatalogCacheMaxSize),
 	}
 }
 
@@ -63,17 +63,17 @@ func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetr
 // so a datapoint never references a series missing from the catalog. If the
 // catalog insert fails, no datapoints are inserted and the cache is unchanged.
 func (m *dash0MetricsServiceServer) writeRows(ctx context.Context, rows metricRows) error {
-	var newSeries []SeriesRow
-	for _, row := range rows.series {
-		if !m.seriesCache.has(row.seriesKey()) {
-			newSeries = append(newSeries, row)
+	var newCatalogRows []CatalogRow
+	for _, row := range rows.catalog {
+		if !m.catalogCache.has(row.catalogKey()) {
+			newCatalogRows = append(newCatalogRows, row)
 		}
 	}
-	if err := m.store.InsertSeries(ctx, newSeries); err != nil {
+	if err := m.store.InsertCatalogRows(ctx, newCatalogRows); err != nil {
 		return fmt.Errorf("inserting catalog rows: %w", err)
 	}
-	for _, row := range newSeries {
-		m.seriesCache.add(row.seriesKey())
+	for _, row := range newCatalogRows {
+		m.catalogCache.add(row.catalogKey())
 	}
 	if err := m.store.InsertDatapoints(ctx, rows.gauges, rows.sums); err != nil {
 		return fmt.Errorf("inserting datapoints: %w", err)

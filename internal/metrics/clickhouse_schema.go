@@ -1,7 +1,7 @@
 package metrics
 
-const createSeriesTableSQL = `
-CREATE TABLE IF NOT EXISTS otel_metrics_series (
+const createCatalogTableSQL = `
+CREATE TABLE IF NOT EXISTS otel_metrics_catalog (
     Day                    Date,
     MetricHash             UInt64,
     ServiceName            LowCardinality(String),

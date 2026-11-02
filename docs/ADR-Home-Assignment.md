@@ -22,7 +22,7 @@ Both tables put time first in their layout. The catalog is bucketed by day, so e
 ```text
 Export request
   ├─ map datapoints, compute MetricHash
-  ├─ catalog rows not in cache ──► otel_metrics_series   (Day, MetricHash, metadata…)
+  ├─ catalog rows not in cache ──► otel_metrics_catalog  (Day, MetricHash, metadata…)
   └─ datapoints ─────────────────► otel_metrics_gauge / otel_metrics_sum
                                     (TimeUnix, MetricHash, Value, …)
 Query
@@ -38,10 +38,11 @@ Use these terms consistently in code, logs, metrics and docs.
 | Metric | What is measured: name, type, unit, description (e.g. `cpu.utilization`) |
 | Resource | Telemetry source; `ResourceMetrics.Resource.Attributes` (e.g. `host.name`) |
 | Scope | OTLP `InstrumentationScope`: the library that emits the metric |
-| Series | One metric + Resource attributes + datapoint attributes (e.g. `cpu.utilization`, `host=web-1`, `cpu=0`) |
+| Series | A *timeseries* in the OpenTelemetry metrics data model (OTLP also calls it a *metric stream*): one metric (name, type, unit, temporality, monotonicity) + Resource attributes + datapoint attributes (e.g. `cpu.utilization`, `host=web-1`, `cpu=0`). Unlike OpenTelemetry, Scope is not part of the identity (see [§9](#9-alternatives-considered)). |
 | Datapoint | One observation of a series: timestamp + value (+ start time, flags) |
 | `MetricHash` | `UInt64` ID of a **series** (not of the metric definition). Join key between datapoints and catalog. |
-| Catalog | `otel_metrics_series`: the lookup table holding series metadata |
+| Catalog | `otel_metrics_catalog`: the lookup table holding series metadata |
+| Catalog row | One row of the catalog: the metadata of a series on a given `Day`, keyed by `(Day, MetricHash)` |
 | `DataPointAttributes` | `NumberDataPoint.Attributes`. Called `Attributes` in the current scaffold rows. |
 
 ## 4. Data model
@@ -72,14 +73,14 @@ The hash decides what counts as "the same series". Every field in it splits hist
 - Description changes do not split a series. The catalog keeps the last description per `(Day, MetricHash)`.
 - **Known limitation:** array, kvlist and bytes attribute values are converted with the proto text format, which is not stable across builds and keeps kvlist keys in arrival order. A series with such an attribute can get a new `MetricHash` after an upgrade, or two `MetricHash` values for the same content in a different order. This is the only accepted exception to the "never hash `%v` output" rule in `AGENTS.md`. Fix path in [§10](#10-open-questions).
 
-### 4.2 Catalog table (`otel_metrics_series`)
+### 4.2 Catalog table (`otel_metrics_catalog`)
 
 Without a time dimension, the catalog would only grow, because new hosts, pods and deployments keep creating new series. Searching it by name or attribute would then always be a full scan. Bucketing it by day keeps metadata lookups as time-bounded as datapoint reads.
 
 A row means: **series `MetricHash` has at least one datapoint on `Day` (UTC)**.
 
 ```sql
-CREATE TABLE otel_metrics_series (
+CREATE TABLE otel_metrics_catalog (
     Day                    Date,
     MetricHash             UInt64,
     ServiceName            LowCardinality(String),
@@ -191,7 +192,7 @@ Every read starts from the time range. The catalog is always filtered by the mat
 
 **Catalog read, deduplicated.** One clause handles both unmerged rows and multi-day rows:
 ```sql
-SELECT ... FROM otel_metrics_series
+SELECT ... FROM otel_metrics_catalog
 WHERE Day BETWEEN toDate(a) AND toDate(b) [AND filters]
 ORDER BY Day DESC
 LIMIT 1 BY MetricHash
@@ -209,7 +210,7 @@ WHERE d.TimeUnix BETWEEN a AND b
 -- Time range + metadata filters: narrow the hashes first
 WHERE d.TimeUnix BETWEEN a AND b
   AND d.MetricHash IN (
-      SELECT MetricHash FROM otel_metrics_series
+      SELECT MetricHash FROM otel_metrics_catalog
       WHERE Day BETWEEN toDate(a) AND toDate(b) AND MetricName = '...')
 ```
 
@@ -226,12 +227,12 @@ Metric prefix: `com.dash0.homeexercise.`
 | `export.requests` | counter | `outcome` | Replaces `metrics.received`, which counts requests rather than metrics |
 | `datapoints.received` | counter | `metric.type` | Inbound volume |
 | `datapoints.dropped` | counter | `metric.type` | Unsupported types |
-| `series.cache.lookups` | counter | `result` = `hit` / `miss` | Cache efficiency, rate of new series |
-| `series.cache.resets` | counter | — | Cache cleared at max size |
+| `catalog.cache.lookups` | counter | `result` = `hit` / `miss` | Cache efficiency, rate of new series |
+| `catalog.cache.resets` | counter | — | Cache cleared at max size |
 | `clickhouse.insert.duration` | histogram | `table`, `outcome` | Insert latency and errors |
 | `clickhouse.insert.rows` | counter | `table` | Rows written |
 
-- **Traces:** child spans under the `otelgrpc` `Export` span: `map`, `insert.series`, `insert.gauge`, `insert.sum`, with series and datapoint counts as attributes.
+- **Traces:** child spans under the `otelgrpc` `Export` span: `map`, `insert.catalog`, `insert.gauge`, `insert.sum`, with series and datapoint counts as attributes.
 - **Logs (`slog`):**
   - `Error`: failed insert (table, row count, error).
   - `Warn`: unsupported types, aggregated per request.
@@ -265,7 +266,7 @@ The assignment starts from Gauge and Sum being stored correctly and asks to rest
 ## 10. Open questions
 
 - **Deterministic conversion of array, kvlist and bytes attributes** (e.g. JSON with sorted keys, base64 for bytes) if such attributes show up in metrics.
-- **LRU cache** (e.g. `hashicorp/golang-lru`) if `series.cache.resets` is frequent.
+- **LRU cache** (e.g. `hashicorp/golang-lru`) if `catalog.cache.resets` is frequent.
 - **Skip indexes / dedicated columns** for frequent attribute filters.
 - **Datapoint deduplication** to move beyond at-least-once.
 - **Observability** section to be detailed further.

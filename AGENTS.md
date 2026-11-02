@@ -72,7 +72,7 @@ A Go gRPC backend that receives OTLP metrics and stores them in ClickHouse, spli
 Examples:
 
 ```text
-feat(catalog): add otel_metrics_series table and insert path
+feat(catalog): add otel_metrics_catalog table and insert path
 fix(hash): length-prefix strings to avoid boundary collisions
 docs: document hour-bucket sort key in ADR
 ```

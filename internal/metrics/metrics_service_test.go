@@ -101,16 +101,16 @@ func server() (colmetricspb.MetricsServiceClient, func()) {
 	return client, closer
 }
 
-// fakeStore records the inserts it receives, e.g. "series:2", "datapoints:1+1".
+// fakeStore records the inserts it receives, e.g. "catalog:2", "datapoints:1+1".
 type fakeStore struct {
 	calls         []string
-	seriesErr     error
+	catalogErr    error
 	datapointsErr error
 }
 
-func (s *fakeStore) InsertSeries(_ context.Context, rows []SeriesRow) error {
-	s.calls = append(s.calls, fmt.Sprintf("series:%d", len(rows)))
-	return s.seriesErr
+func (s *fakeStore) InsertCatalogRows(_ context.Context, rows []CatalogRow) error {
+	s.calls = append(s.calls, fmt.Sprintf("catalog:%d", len(rows)))
+	return s.catalogErr
 }
 
 func (s *fakeStore) InsertDatapoints(_ context.Context, gauges []DatapointRow, sums []DatapointRow) error {
@@ -122,7 +122,7 @@ func TestExport_WritePath(t *testing.T) {
 	errClickHouse := errors.New("clickhouse unavailable")
 
 	type exportStep struct {
-		seriesErr     error
+		catalogErr    error
 		datapointsErr error
 		wantErr       bool
 		wantCalls     []string
@@ -130,19 +130,19 @@ func TestExport_WritePath(t *testing.T) {
 
 	tests := map[string][]exportStep{
 		"catalog is written before datapoints": {
-			{wantCalls: []string{"series:2", "datapoints:1+1"}},
+			{wantCalls: []string{"catalog:2", "datapoints:1+1"}},
 		},
 		"known series are not rewritten to the catalog": {
-			{wantCalls: []string{"series:2", "datapoints:1+1"}},
-			{wantCalls: []string{"series:0", "datapoints:1+1"}},
+			{wantCalls: []string{"catalog:2", "datapoints:1+1"}},
+			{wantCalls: []string{"catalog:0", "datapoints:1+1"}},
 		},
 		"catalog failure inserts no datapoints and does not cache the series": {
-			{seriesErr: errClickHouse, wantErr: true, wantCalls: []string{"series:2"}},
-			{wantCalls: []string{"series:2", "datapoints:1+1"}},
+			{catalogErr: errClickHouse, wantErr: true, wantCalls: []string{"catalog:2"}},
+			{wantCalls: []string{"catalog:2", "datapoints:1+1"}},
 		},
 		"datapoint failure keeps the series cached": {
-			{datapointsErr: errClickHouse, wantErr: true, wantCalls: []string{"series:2", "datapoints:1+1"}},
-			{wantCalls: []string{"series:0", "datapoints:1+1"}},
+			{datapointsErr: errClickHouse, wantErr: true, wantCalls: []string{"catalog:2", "datapoints:1+1"}},
+			{wantCalls: []string{"catalog:0", "datapoints:1+1"}},
 		},
 	}
 
@@ -159,7 +159,7 @@ func TestExport_WritePath(t *testing.T) {
 
 			for i, step := range steps {
 				store.calls = nil
-				store.seriesErr = step.seriesErr
+				store.catalogErr = step.catalogErr
 				store.datapointsErr = step.datapointsErr
 
 				_, err := server.Export(context.Background(), request)

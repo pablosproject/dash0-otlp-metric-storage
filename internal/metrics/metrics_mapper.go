@@ -70,27 +70,27 @@ func numberDataPointValue(datapoint *metricspb.NumberDataPoint) float64 {
 
 // metricRows holds the rows produced from one Export request.
 type metricRows struct {
-	series []SeriesRow
-	gauges []DatapointRow
-	sums   []DatapointRow
+	catalog []CatalogRow
+	gauges  []DatapointRow
+	sums    []DatapointRow
 }
 
-type seriesKey struct {
+type catalogKey struct {
 	dayUnix    int64
 	metricHash uint64
 }
 
-func (row SeriesRow) seriesKey() seriesKey {
-	return seriesKey{dayUnix: row.Day.Unix(), metricHash: row.MetricHash}
+func (row CatalogRow) catalogKey() catalogKey {
+	return catalogKey{dayUnix: row.Day.Unix(), metricHash: row.MetricHash}
 }
 
 type rowMapper struct {
-	rows        metricRows
-	seriesIndex map[seriesKey]int
+	rows         metricRows
+	catalogIndex map[catalogKey]int
 }
 
 func mapExportRequest(request *colmetricspb.ExportMetricsServiceRequest) metricRows {
-	m := rowMapper{seriesIndex: make(map[seriesKey]int)}
+	m := rowMapper{catalogIndex: make(map[catalogKey]int)}
 
 	for _, resourceMetrics := range request.GetResourceMetrics() {
 		serviceName := resourceServiceName(resourceMetrics.GetResource())
@@ -101,7 +101,7 @@ func mapExportRequest(request *colmetricspb.ExportMetricsServiceRequest) metricR
 			scopeAttributes := kvToMap(scope.GetAttributes())
 
 			for _, metric := range scopeMetrics.GetMetrics() {
-				base := SeriesRow{
+				base := CatalogRow{
 					ServiceName:           serviceName,
 					MetricName:            metric.GetName(),
 					MetricUnit:            metric.GetUnit(),
@@ -127,7 +127,7 @@ func mapExportRequest(request *colmetricspb.ExportMetricsServiceRequest) metricR
 	return m.rows
 }
 
-func numberDataPoints(metric *metricspb.Metric, base *SeriesRow) (datapoints []*metricspb.NumberDataPoint, ok bool) {
+func numberDataPoints(metric *metricspb.Metric, base *CatalogRow) (datapoints []*metricspb.NumberDataPoint, ok bool) {
 	switch data := metric.GetData().(type) {
 	case *metricspb.Metric_Gauge:
 		base.MetricType = MetricTypeGauge
@@ -144,28 +144,28 @@ func numberDataPoints(metric *metricspb.Metric, base *SeriesRow) (datapoints []*
 
 // addDatapoint adds the datapoint row and the catalog row of its series. The
 // catalog keeps one row per (Day, MetricHash): the last one seen wins.
-func (m *rowMapper) addDatapoint(series SeriesRow, datapoint *metricspb.NumberDataPoint) {
-	series.DataPointAttributes = kvToMap(datapoint.GetAttributes())
-	series.MetricHash = metricHash(&series)
+func (m *rowMapper) addDatapoint(catalogRow CatalogRow, datapoint *metricspb.NumberDataPoint) {
+	catalogRow.DataPointAttributes = kvToMap(datapoint.GetAttributes())
+	catalogRow.MetricHash = metricHash(&catalogRow)
 	timeUnix := nanosToTime(datapoint.GetTimeUnixNano())
-	series.Day = utcDay(timeUnix)
+	catalogRow.Day = utcDay(timeUnix)
 
-	key := series.seriesKey()
-	if i, ok := m.seriesIndex[key]; ok {
-		m.rows.series[i] = series
+	key := catalogRow.catalogKey()
+	if i, ok := m.catalogIndex[key]; ok {
+		m.rows.catalog[i] = catalogRow
 	} else {
-		m.seriesIndex[key] = len(m.rows.series)
-		m.rows.series = append(m.rows.series, series)
+		m.catalogIndex[key] = len(m.rows.catalog)
+		m.rows.catalog = append(m.rows.catalog, catalogRow)
 	}
 
 	row := DatapointRow{
 		TimeUnix:      timeUnix,
-		MetricHash:    series.MetricHash,
+		MetricHash:    catalogRow.MetricHash,
 		StartTimeUnix: nanosToTime(datapoint.GetStartTimeUnixNano()),
 		Value:         numberDataPointValue(datapoint),
 		Flags:         datapoint.GetFlags(),
 	}
-	if series.MetricType == MetricTypeGauge {
+	if catalogRow.MetricType == MetricTypeGauge {
 		m.rows.gauges = append(m.rows.gauges, row)
 	} else {
 		m.rows.sums = append(m.rows.sums, row)

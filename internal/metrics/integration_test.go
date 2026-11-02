@@ -88,13 +88,13 @@ func TestCreateTables(t *testing.T) {
 		tables = append(tables, name)
 	}
 
-	want := []string{"otel_metrics_gauge", "otel_metrics_series", "otel_metrics_sum"}
+	want := []string{"otel_metrics_catalog", "otel_metrics_gauge", "otel_metrics_sum"}
 	if !slices.Equal(tables, want) {
 		t.Errorf("got tables %v, want %v", tables, want)
 	}
 }
 
-func TestInsertSeries(t *testing.T) {
+func TestInsertCatalogRows(t *testing.T) {
 	store, cleanup := setupClickHouse(t)
 	defer cleanup()
 
@@ -103,7 +103,7 @@ func TestInsertSeries(t *testing.T) {
 		t.Fatalf("creating tables: %v", err)
 	}
 
-	want := SeriesRow{
+	want := CatalogRow{
 		Day:                    time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC),
 		MetricHash:             12345,
 		ServiceName:            "api",
@@ -122,12 +122,12 @@ func TestInsertSeries(t *testing.T) {
 		ScopeDroppedAttrCount:  3,
 		DataPointAttributes:    map[string]string{"method": "GET"},
 	}
-	if err := store.InsertSeries(ctx, []SeriesRow{want}); err != nil {
-		t.Fatalf("inserting series rows: %v", err)
+	if err := store.InsertCatalogRows(ctx, []CatalogRow{want}); err != nil {
+		t.Fatalf("inserting catalog rows: %v", err)
 	}
 
 	var (
-		got        SeriesRow
+		got        CatalogRow
 		metricType string
 	)
 	err := store.conn.QueryRow(ctx, `
@@ -135,13 +135,13 @@ func TestInsertSeries(t *testing.T) {
 		       AggregationTemporality, IsMonotonic, ResourceAttributes, ResourceSchemaUrl,
 		       ScopeName, ScopeVersion, ScopeAttributes, ScopeSchemaUrl, ScopeDroppedAttrCount,
 		       DataPointAttributes
-		FROM otel_metrics_series`,
+		FROM otel_metrics_catalog`,
 	).Scan(&got.Day, &got.MetricHash, &got.ServiceName, &got.MetricName, &metricType, &got.MetricUnit,
 		&got.MetricDescription, &got.AggregationTemporality, &got.IsMonotonic, &got.ResourceAttributes,
 		&got.ResourceSchemaUrl, &got.ScopeName, &got.ScopeVersion, &got.ScopeAttributes, &got.ScopeSchemaUrl,
 		&got.ScopeDroppedAttrCount, &got.DataPointAttributes)
 	if err != nil {
-		t.Fatalf("querying series: %v", err)
+		t.Fatalf("querying catalog: %v", err)
 	}
 
 	if metricType != "sum" {
@@ -153,7 +153,7 @@ func TestInsertSeries(t *testing.T) {
 	}
 	got.Day = want.Day
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("series row mismatch:\ngot  %+v\nwant %+v", got, want)
+		t.Errorf("catalog row mismatch:\ngot  %+v\nwant %+v", got, want)
 	}
 }
 
@@ -247,7 +247,7 @@ func TestGRPCToClickHouse(t *testing.T) {
 	}
 
 	var catalogRows uint64
-	if err := store.conn.QueryRow(ctx, "SELECT count() FROM otel_metrics_series").Scan(&catalogRows); err != nil {
+	if err := store.conn.QueryRow(ctx, "SELECT count() FROM otel_metrics_catalog").Scan(&catalogRows); err != nil {
 		t.Fatalf("counting catalog rows: %v", err)
 	}
 	if catalogRows != 2 {
@@ -270,7 +270,7 @@ func TestGRPCToClickHouse(t *testing.T) {
 				FROM %s AS d
 				INNER JOIN (
 					SELECT MetricHash, ServiceName, MetricName
-					FROM otel_metrics_series
+					FROM otel_metrics_catalog
 					WHERE Day BETWEEN toDate($1) AND toDate($2)
 					ORDER BY Day DESC
 					LIMIT 1 BY MetricHash
