@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"go.opentelemetry.io/contrib/exporters/autoexport"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutlog"
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
@@ -52,7 +53,7 @@ func setupOTelSDK(ctx context.Context) (shutdown func(context.Context) error, er
 	otel.SetTextMapPropagator(prop)
 
 	// Set up trace provider.
-	tracerProvider, err := newTraceProvider()
+	tracerProvider, err := newTraceProvider(ctx)
 	if err != nil {
 		handleErr(err)
 		return
@@ -61,7 +62,7 @@ func setupOTelSDK(ctx context.Context) (shutdown func(context.Context) error, er
 	otel.SetTracerProvider(tracerProvider)
 
 	// Set up meter provider.
-	meterProvider, err := newMeterProvider()
+	meterProvider, err := newMeterProvider(ctx)
 	if err != nil {
 		handleErr(err)
 		return
@@ -70,7 +71,7 @@ func setupOTelSDK(ctx context.Context) (shutdown func(context.Context) error, er
 	otel.SetMeterProvider(meterProvider)
 
 	// Set up logger provider.
-	loggerProvider, err := newLoggerProvider()
+	loggerProvider, err := newLoggerProvider(ctx)
 	if err != nil {
 		handleErr(err)
 		return
@@ -88,16 +89,20 @@ func newPropagator() propagation.TextMapPropagator {
 	)
 }
 
-func newTraceProvider() (*trace.TracerProvider, error) {
-	traceExporter, err := stdouttrace.New(
-		stdouttrace.WithPrettyPrint())
+// newTraceProvider exports through the exporter selected by the standard
+// OTEL_TRACES_EXPORTER variable (e.g. otlp, none), and to stdout when it is
+// unset. The sampler is read from OTEL_TRACES_SAMPLER (default: always on).
+func newTraceProvider(ctx context.Context) (*trace.TracerProvider, error) {
+	traceExporter, err := autoexport.NewSpanExporter(ctx, autoexport.WithFallbackSpanExporter(
+		func(context.Context) (trace.SpanExporter, error) {
+			return stdouttrace.New(stdouttrace.WithPrettyPrint())
+		}))
 	if err != nil {
 		return nil, err
 	}
 
 	traceProvider := trace.NewTracerProvider(
 		trace.WithResource(res),
-		trace.WithSampler(trace.AlwaysSample()),
 		trace.WithBatcher(traceExporter,
 			// Default is 5s. Set to 1s for demonstrative purposes.
 			trace.WithBatchTimeout(time.Second)),
@@ -105,23 +110,36 @@ func newTraceProvider() (*trace.TracerProvider, error) {
 	return traceProvider, nil
 }
 
-func newMeterProvider() (*metric.MeterProvider, error) {
-	metricExporter, err := stdoutmetric.New(stdoutmetric.WithPrettyPrint())
+// newMeterProvider exports through the exporter selected by the standard
+// OTEL_METRICS_EXPORTER variable (e.g. otlp), and to stdout when it is unset.
+func newMeterProvider(ctx context.Context) (*metric.MeterProvider, error) {
+	metricReader, err := autoexport.NewMetricReader(ctx, autoexport.WithFallbackMetricReader(
+		func(context.Context) (metric.Reader, error) {
+			metricExporter, err := stdoutmetric.New(stdoutmetric.WithPrettyPrint())
+			if err != nil {
+				return nil, err
+			}
+			// Default is 1m. Set to 10s for demonstrative purposes.
+			return metric.NewPeriodicReader(metricExporter, metric.WithInterval(10*time.Second)), nil
+		}))
 	if err != nil {
 		return nil, err
 	}
 
 	meterProvider := metric.NewMeterProvider(
 		metric.WithResource(res),
-		metric.WithReader(metric.NewPeriodicReader(metricExporter,
-			// Default is 1m. Set to 10s for demonstrative purposes.
-			metric.WithInterval(10*time.Second))),
+		metric.WithReader(metricReader),
 	)
 	return meterProvider, nil
 }
 
-func newLoggerProvider() (*log.LoggerProvider, error) {
-	logExporter, err := stdoutlog.New(stdoutlog.WithPrettyPrint())
+// newLoggerProvider exports through the exporter selected by the standard
+// OTEL_LOGS_EXPORTER variable (e.g. otlp), and to stdout when it is unset.
+func newLoggerProvider(ctx context.Context) (*log.LoggerProvider, error) {
+	logExporter, err := autoexport.NewLogExporter(ctx, autoexport.WithFallbackLogExporter(
+		func(context.Context) (log.Exporter, error) {
+			return stdoutlog.New(stdoutlog.WithPrettyPrint())
+		}))
 	if err != nil {
 		return nil, err
 	}

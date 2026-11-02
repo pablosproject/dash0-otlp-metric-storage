@@ -9,29 +9,12 @@ import (
 	"slices"
 	"strings"
 
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/metric"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"dash0.com/otlp-log-processor-backend/internal/telemetry"
 )
-
-const name = "dash0.com/otlp-log-processor-backend"
-
-var (
-	meter                  = otel.Meter(name)
-	metricsReceivedCounter metric.Int64Counter
-)
-
-func init() {
-	var err error
-	metricsReceivedCounter, err = meter.Int64Counter("com.dash0.homeexercise.metrics.received",
-		metric.WithDescription("The number of metrics received by otlp-metrics-processor-backend"),
-		metric.WithUnit("{metric}"))
-	if err != nil {
-		panic(err)
-	}
-}
 
 // defaultCatalogCacheMaxSize bounds the catalog cache to a few MB of keys.
 const defaultCatalogCacheMaxSize = 100_000
@@ -53,16 +36,29 @@ func NewServer(addr string, store MetricsStore) colmetricspb.MetricsServiceServe
 }
 
 func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetricspb.ExportMetricsServiceRequest) (*colmetricspb.ExportMetricsServiceResponse, error) {
-	slog.DebugContext(ctx, "Received ExportMetricsServiceRequest")
-	metricsReceivedCounter.Add(ctx, 1)
-
 	rows := mapExportRequest(request)
+	telemetry.RecordDatapointsReceived(ctx, "gauge", int64(len(rows.gauges)))
+	telemetry.RecordDatapointsReceived(ctx, "sum", int64(len(rows.sums)))
+	for metricType, count := range rows.rejectedDatapoints {
+		telemetry.RecordDatapointsReceived(ctx, metricType, count)
+		telemetry.RecordDatapointsDropped(ctx, metricType, count)
+	}
+
 	if err := m.writeRows(ctx, rows); err != nil {
-		slog.ErrorContext(ctx, "Storing metrics failed", slog.String("error", err.Error()))
+		telemetry.RecordExportRequest(ctx, telemetry.OutcomeFailure)
 		return nil, exportError(ctx, err)
 	}
 
-	return &colmetricspb.ExportMetricsServiceResponse{PartialSuccess: partialSuccess(rows.rejectedDatapoints)}, nil
+	response := &colmetricspb.ExportMetricsServiceResponse{PartialSuccess: partialSuccess(rows.rejectedDatapoints)}
+	if response.PartialSuccess != nil {
+		telemetry.RecordExportRequest(ctx, telemetry.OutcomePartialSuccess)
+		slog.WarnContext(ctx, "Rejected datapoints of unsupported metric types",
+			slog.Int64("rejectedDatapoints", response.PartialSuccess.RejectedDataPoints),
+			slog.String("detail", response.PartialSuccess.ErrorMessage))
+	} else {
+		telemetry.RecordExportRequest(ctx, telemetry.OutcomeSuccess)
+	}
+	return response, nil
 }
 
 func (m *dash0MetricsServiceServer) writeRows(ctx context.Context, rows metricRows) error {
@@ -72,11 +68,14 @@ func (m *dash0MetricsServiceServer) writeRows(ctx context.Context, rows metricRo
 			newCatalogRows = append(newCatalogRows, row)
 		}
 	}
+	telemetry.RecordCatalogCacheLookups(ctx, len(rows.catalog)-len(newCatalogRows), len(newCatalogRows))
 	if err := m.store.InsertCatalogRows(ctx, newCatalogRows); err != nil {
 		return fmt.Errorf("inserting catalog rows: %w", err)
 	}
 	for _, row := range newCatalogRows {
-		m.catalogCache.add(row.catalogKey())
+		if m.catalogCache.add(row.catalogKey()) {
+			telemetry.RecordCatalogCacheReset(ctx)
+		}
 	}
 	if err := m.store.InsertDatapoints(ctx, rows.gauges, rows.sums); err != nil {
 		return fmt.Errorf("inserting datapoints: %w", err)

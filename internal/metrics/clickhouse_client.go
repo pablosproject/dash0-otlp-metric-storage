@@ -7,6 +7,8 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+
+	"dash0.com/otlp-log-processor-backend/internal/telemetry"
 )
 
 // MetricType matches the Enum8 values of otel_metrics_catalog.MetricType.
@@ -117,6 +119,13 @@ func (s *ClickHouseMetricsStore) InsertCatalogRows(ctx context.Context, rows []C
 	if len(rows) == 0 {
 		return nil
 	}
+	start := time.Now()
+	err := s.sendCatalogRows(ctx, rows)
+	telemetry.RecordClickHouseInsert(ctx, "otel_metrics_catalog", len(rows), time.Since(start), err)
+	return err
+}
+
+func (s *ClickHouseMetricsStore) sendCatalogRows(ctx context.Context, rows []CatalogRow) error {
 	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_catalog")
 	if err != nil {
 		return fmt.Errorf("preparing catalog batch: %w", err)
@@ -154,6 +163,13 @@ func (s *ClickHouseMetricsStore) insertDatapoints(ctx context.Context, table str
 	if len(rows) == 0 {
 		return nil
 	}
+	start := time.Now()
+	err := s.sendDatapoints(ctx, table, rows)
+	telemetry.RecordClickHouseInsert(ctx, table, len(rows), time.Since(start), err)
+	return err
+}
+
+func (s *ClickHouseMetricsStore) sendDatapoints(ctx context.Context, table string, rows []DatapointRow) error {
 	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO "+table)
 	if err != nil {
 		return fmt.Errorf("preparing %s batch: %w", table, err)

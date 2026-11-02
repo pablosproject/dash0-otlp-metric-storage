@@ -224,19 +224,20 @@ Metric prefix: `com.dash0.homeexercise.`
 
 | Metric | Type | Attributes | Purpose |
 | --- | --- | --- | --- |
-| `export.requests` | counter | `outcome` | Replaces `metrics.received`, which counts requests rather than metrics |
-| `datapoints.received` | counter | `metric.type` | Inbound volume |
+| `export.requests` | counter | `outcome` = `success` / `partial_success` / `failure` | Replaces `metrics.received`, which counts requests rather than metrics |
+| `datapoints.received` | counter | `metric.type` = `gauge` / `sum` / `histogram` / `exponential_histogram` / `summary` | Inbound volume |
 | `datapoints.dropped` | counter | `metric.type` | Unsupported types |
 | `catalog.cache.lookups` | counter | `result` = `hit` / `miss` | Cache efficiency, rate of new series |
 | `catalog.cache.resets` | counter | — | Cache cleared at max size |
-| `clickhouse.insert.duration` | histogram | `table`, `outcome` | Insert latency and errors |
+| `clickhouse.insert.duration` | histogram (s) | `table`, `outcome` = `success` / `failure` | Insert latency, including the async insert flush, and errors |
 | `clickhouse.insert.rows` | counter | `table` | Rows written |
 
-- **Traces:** child spans under the `otelgrpc` `Export` span: `map`, `insert.catalog`, `insert.gauge`, `insert.sum`, with series and datapoint counts as attributes.
 - **Logs (`slog`):**
-  - `Error`: failed insert (table, row count, error).
+  - `Error`: failed insert (table, row count, error), logged by the store where the table is known.
   - `Warn`: unsupported types, aggregated per request.
-  - `Debug`: per-request summary.
+  - No per-request `Debug` log: every log record is exported, so at high throughput it would only add noise. The metrics above carry the same counts.
+- **Traces:** only the `otelgrpc` `Export` span. Domain child spans (`map`, `insert.catalog`, `insert.gauge`, `insert.sum`) are deferred: the goal for now is monitoring, not per-request debugging.
+- **Exporters:** chosen through the standard `OTEL_METRICS_EXPORTER` / `OTEL_LOGS_EXPORTER` / `OTEL_TRACES_EXPORTER` / `OTEL_EXPORTER_OTLP_*` variables (`autoexport`), so production points at a Collector without code changes. When they are unset, telemetry goes to stdout as in the scaffold. The trace sampler follows `OTEL_TRACES_SAMPLER` (default: always on), so production can sample the per-request `Export` spans.
 
 ## 8. Supported metric types
 
@@ -270,4 +271,4 @@ The assignment starts from Gauge and Sum being stored correctly and asks to rest
 - **Skip indexes / dedicated columns** for frequent attribute filters.
 - **Datapoint deduplication** to move beyond at-least-once.
 - **Classifying ClickHouse errors:** every store error is returned as `Unavailable`, so permanent errors (e.g. `UNKNOWN_TABLE`, `TYPE_MISMATCH`) are retried until the client gives up. Mapping them to a non-retryable code (`Internal`) needs a maintained list of ClickHouse error codes; a wrong entry would drop data that a retry would have stored.
-- **Observability** section to be detailed further.
+- **Domain spans** (`map`, `insert.catalog`, `insert.gauge`, `insert.sum`) if per-request debugging is needed.

@@ -23,12 +23,14 @@ func (c *catalogCache) has(key catalogKey) bool {
 	return ok
 }
 
-func (c *catalogCache) add(key catalogKey) {
+func (c *catalogCache) add(key catalogKey) (cleared bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if len(c.keys) >= c.maxSize {
 		c.keys = make(map[catalogKey]struct{})
+		cleared = true
 	}
 	c.keys[key] = struct{}{}
+	return cleared
 }
