@@ -41,7 +41,7 @@ A Go gRPC backend that receives OTLP metrics and stores them in ClickHouse, spli
 - Go 1.26, standard library first. Add a dependency only when it clearly pays off, and say why.
 - Simple and explicit over clever. No speculative abstractions.
 - Descriptive variable names, as clear as possible: `resourceMetrics` not `rm`, `datapoint` not `dp`, `serviceName` not `svcName`, `resourceAttributes` not `resAttrs`. Single-letter or abbreviated names only where Go idiom expects them: `i`, `err`, `ctx`, `t`, method receivers.
-- Comments only where the code is critical or genuinely non-obvious. Do not use comments to explain a change or a fix; that belongs in the commit message.
+- Keep comments to the bare minimum. Write one only when the code cannot be understood on its own: a non-obvious invariant, ordering constraint or trade-off. Do not restate what the name, signature or body already says, and do not add doc comments just to describe the obvious. Do not use comments to explain a change or a fix; that belongs in the commit message.
 - Wrap errors with context (`fmt.Errorf("inserting catalog rows: %w", err)`).
 - Logging through `slog` (bridged to OTel). Structured fields, no string concatenation.
 - Never log or hash with `fmt.Sprintf("%v", protoMessage)`: the proto text format is not stable.
