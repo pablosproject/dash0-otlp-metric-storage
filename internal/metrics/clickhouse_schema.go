@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS otel_metrics_gauge (
     Flags         UInt32 CODEC(ZSTD(1))
 ) ENGINE = MergeTree
 PARTITION BY toDate(TimeUnix, 'UTC')
-ORDER BY (toStartOfHour(TimeUnix, 'UTC'), MetricHash, TimeUnix)
+ORDER BY (MetricHash, TimeUnix)
 SETTINGS ttl_only_drop_parts = 1;
 `
 
@@ -46,6 +46,6 @@ CREATE TABLE IF NOT EXISTS otel_metrics_sum (
     Flags         UInt32 CODEC(ZSTD(1))
 ) ENGINE = MergeTree
 PARTITION BY toDate(TimeUnix, 'UTC')
-ORDER BY (toStartOfHour(TimeUnix, 'UTC'), MetricHash, TimeUnix)
+ORDER BY (MetricHash, TimeUnix)
 SETTINGS ttl_only_drop_parts = 1;
 `

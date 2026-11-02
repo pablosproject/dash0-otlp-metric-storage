@@ -17,7 +17,7 @@ The scaffold stores every datapoint as a fully denormalized row: Resource attrib
 
 Each distinct combination of metric, Resource attributes and datapoint attributes is a **series**. It is identified by a deterministic 64-bit hash (`MetricHash`) computed in the service. The metadata of each series is written to a **catalog** table, once per day the series is active. Datapoints carry only `MetricHash`, timestamp and value.
 
-Both tables put time first in their layout. The catalog is bucketed by day, so even metadata lookups are time-bounded. Datapoints are partitioned by day and sorted by hour bucket and then series, so time-only queries and per-series queries are both efficient. On ingest, catalog rows are written before the datapoints that reference them. An in-memory cache avoids rewriting known series.
+Both tables are bounded by time. The catalog is bucketed by day, so even metadata lookups are time-bounded. Datapoints are partitioned by day and sorted by series, then time: the daily partition bounds every read to the requested days, and the sort key narrows it to the series selected in the catalog. On ingest, catalog rows are written before the datapoints that reference them. An in-memory cache avoids rewriting known series.
 
 ```text
 Export request
@@ -110,7 +110,7 @@ ORDER BY (Day, MetricHash)
 
 ### 4.3 Datapoint tables (`otel_metrics_gauge`, `otel_metrics_sum`)
 
-The datapoint layout has to serve two queries well: "everything in a time range" (the only guaranteed filter) and "these series in a time range" (after a catalog lookup). Neither pure time-first nor pure hash-first ordering does both. An hour bucket in front of the hash does.
+Every read starts from the time range (the only guaranteed filter) and goes through the catalog first (§6), so the datapoint tables are read as "these series in a time range". The daily partition bounds the time range; the sort key serves the series.
 
 ```sql
 CREATE TABLE otel_metrics_gauge (   -- otel_metrics_sum: same columns
@@ -121,7 +121,7 @@ CREATE TABLE otel_metrics_gauge (   -- otel_metrics_sum: same columns
     Flags         UInt32 CODEC(ZSTD(1))
 ) ENGINE = MergeTree
 PARTITION BY toDate(TimeUnix, 'UTC')
-ORDER BY (toStartOfHour(TimeUnix, 'UTC'), MetricHash, TimeUnix)
+ORDER BY (MetricHash, TimeUnix)
 ```
 
 - **Gauge and Sum stay in separate tables, even though their columns are identical.** `AggregationTemporality` and `IsMonotonic` are metric-level fields (on `Sum`, not on `NumberDataPoint`), so they live in the catalog. That leaves no type-specific column on the datapoints. We keep two tables because:
@@ -129,17 +129,30 @@ ORDER BY (toStartOfHour(TimeUnix, 'UTC'), MetricHash, TimeUnix)
   - it keeps continuity with the scaffold and its tests.
 
   Trade-off: a query across all types needs `UNION ALL`, and each request does one insert per table. Merging them into one numeric table is a valid alternative (see §9).
-- **Sort key: three options evaluated.**
+- **Partition: one day.** Every query, even one with no other filter than time, reads only the partitions of its days, so no read scans the whole table. Hourly *partitions* would multiply parts (every insert creates at least one part per partition touched, and parts of different partitions never merge), which hurts compression and risks `TOO_MANY_PARTS`.
+- **Sort key: `(MetricHash, TimeUnix)`.** Inside a day, rows are grouped by series and then by time, so a series + time query reads only the granules of the requested series, and the values of one series are contiguous and compress well. A time-only query reads the whole day partitions it touches; the catalog-first pattern of §6 avoids it.
 
-  | `ORDER BY` | Time-only query | Series + time query | Compression |
+  `(TimeUnix, MetricHash)` was ruled out: nanosecond timestamps make the hash useless as a second key, and series interleave, so they compress poorly.
+
+  **Revised from the first version of this ADR**, which put an hour bucket in front:
+
+  ```sql
+  -- before
+  ORDER BY (toStartOfHour(TimeUnix, 'UTC'), MetricHash, TimeUnix)
+  -- after
+  ORDER BY (MetricHash, TimeUnix)
+  ```
+
+  The bucket was meant to prune granules for time-only queries while keeping series contiguous inside each hour. Measured with `EXPLAIN indexes = 1` on ClickHouse 26.2, it does neither: a filter on `TimeUnix` is not matched against `toStartOfHour(TimeUnix, 'UTC')` (the primary key analysis uses only `MetricHash, TimeUnix`), and with an unconstrained first column the hash prunes almost nothing.
+
+  Measurement with `make query-plan` ([`scripts/query-plan`](../scripts/query-plan/main.go)): 2000 series, one datapoint every 30s, three days (17.3M rows, 704 granules per day). Both queries read the catalog first, then the datapoints of one hour with `MetricHash IN (…)`:
+
+  | Query | Primary key granules (of the day) | Rows read | Data read |
   | --- | --- | --- | --- |
-  | `(TimeUnix, MetricHash)` | reads only the range | reads every series in the range: ns timestamps make the hash useless as a second key | poor: series interleave |
-  | `(MetricHash, TimeUnix)` | reads the whole day partition | optimal | optimal |
-  | **`(toStartOfHour(TimeUnix), MetricHash, TimeUnix)`** ✅ | at most one extra hour | near optimal | near optimal |
+  | One metric across all services, per-minute average (100 series) | 693 → **133** of 704 | 5.69M → **1.11M** | 47 → **19.7** MiB |
+  | Latest value of every series of one service (200 series) | 704 → **227** of 704 | 5.78M → **1.88M** | 48 → **37.8** MiB |
 
-  The chosen key groups rows by hour, then by series, then by time. A time-only query reads only the matching hours, because `toStartOfHour` is monotonic and a filter on `TimeUnix` uses the first key column. A series + time query jumps to the series block inside each hour. Values of one series are contiguous inside each hour, so they compress well.
-- **Partition vs sort key.** The daily partition prunes whole days without opening their files. The hour bucket prunes granules inside a day. Hourly *partitions* would multiply parts (every insert creates at least one part per partition touched, and parts of different partitions never merge), which hurts compression and risks `TOO_MANY_PARTS`.
-- The bucket size is tunable. Verify with `EXPLAIN indexes = 1`.
+  The pruning comes from `MetricHash`: here one series holds 2880 rows a day, a third of a granule, so time cannot prune inside a series. Denser series span more granules, and `TimeUnix` then prunes within each of them too. Rerun the script after any change to the datapoint layout.
 - **Known limitation:** `as_int` values are stored in `Value Float64`, like the scaffold and the OpenTelemetry ClickHouse exporter. Integers above 2⁵³ lose precision, e.g. long-running cumulative byte counters. A separate `Int64` column would keep them exact, at the cost of a wider schema and queries that must pick the right column.
 
 ## 5. Ingestion
@@ -199,19 +212,16 @@ LIMIT 1 BY MetricHash
 ```
 `FINAL` is not needed. The catalog returns a **superset** of the active series, and datapoints apply the exact time filter.
 
+**Datapoint read: always by `MetricHash` and time.** The join alone does not prune the datapoint table by hash, so the hashes selected in the catalog are also passed as `MetricHash IN (…)`. Without it, a read covers the whole day partitions of its range.
+
 **Joins:** datapoints on the left (streamed), the deduplicated catalog on the right (in memory).
 ```sql
--- Time range only
+WITH series AS (<catalog read> [AND filters])
 SELECT d.TimeUnix, d.Value, s.MetricName, s.ResourceAttributes, s.DataPointAttributes
 FROM otel_metrics_gauge AS d
-INNER JOIN (<catalog read>) AS s USING MetricHash
-WHERE d.TimeUnix BETWEEN a AND b
-
--- Time range + metadata filters: narrow the hashes first
-WHERE d.TimeUnix BETWEEN a AND b
-  AND d.MetricHash IN (
-      SELECT MetricHash FROM otel_metrics_catalog
-      WHERE Day BETWEEN toDate(a) AND toDate(b) AND MetricName = '...')
+INNER JOIN series AS s USING MetricHash
+WHERE d.MetricHash IN (SELECT MetricHash FROM series)
+  AND d.TimeUnix BETWEEN a AND b
 ```
 
 `Map` columns are not indexes. Attribute lookups are bounded by `Day` but not guaranteed fast within it. Skip indexes or dedicated columns are to be evaluated with real queries.
@@ -258,6 +268,7 @@ The assignment starts from Gauge and Sum being stored correctly and asks to rest
 | Catalog without a time dimension | Metadata lookups become full scans as Resources churn |
 | Separate Resource table with its own hash | Extra insert and lookup. Resource attributes repeat per series, not per datapoint. |
 | Hourly partitions | Too many parts |
+| Hour bucket first in the datapoint sort key | Measured: no time pruning and almost no hash pruning (§4.3) |
 | Single datapoint table for Gauge + Sum | Fewer inserts, and time-only queries read one table. Rejected for now: queries usually target one type, and separate tables keep the type filter free and the scaffold structure intact. The type would live in the catalog (`MetricType`), optionally also as an `Enum8` column on the datapoints. |
 | In-service write buffer | Flush goroutines, backpressure, shutdown complexity; data-loss risk if OK is returned before the flush |
 | `AggregatingMergeTree` with `FirstSeen`/`LastSeen` | Incompatible with the cache: `LastSeen` stays at the first write of the day. Day granularity is enough for a superset. |
