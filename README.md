@@ -111,6 +111,16 @@ Stop ClickHouse and drop its data:
 docker compose down
 ```
 
+## Query plan
+
+`make query-plan` measures how the datapoint layout serves typical reads (ADR §4.3). It starts ClickHouse, creates the tables with the service's own DDL in a scratch database (`query_plan`, so `default` is not touched), loads synthetic data (2000 series, one datapoint every 30s for three days) and runs two catalog-first queries. For each query it prints:
+
+- the SQL;
+- `EXPLAIN indexes = 1`: parts and granules selected by each index, per table;
+- what the execution actually read, from `system.query_log`: rows, bytes, parts, granules and duration.
+
+Rerun it after any change to the datapoint schema and compare the numbers.
+
 ## Tests
 
 | Command | Description |
