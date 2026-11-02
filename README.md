@@ -5,51 +5,34 @@ A gRPC backend that receives OpenTelemetry metrics (OTLP) and stores them in Cli
 - Assignment: [`docs/INSTRUCTION.md`](docs/INSTRUCTION.md)
 - Design decisions: [`docs/ADR-Home-Assignment.md`](docs/ADR-Home-Assignment.md)
 
-## Current state
+## Running it
 
-- **Storage:** Gauge and Sum datapoints are stored as lean rows (`otel_metrics_gauge`, `otel_metrics_sum`) that reference the series catalog (`otel_metrics_catalog`) by `MetricHash`. Catalog rows are written before the datapoints. Covered by unit and integration tests.
-- **Catalog cache:** each instance writes a series to the catalog once per day; known `(Day, MetricHash)` keys are skipped. The cache is updated only after a successful catalog insert.
-- **Async inserts:** ClickHouse batches small inserts server-side; `Export` returns only once the data is persisted. See [Async inserts](#async-inserts).
-- **gRPC status codes:** storage errors are returned as `Unavailable`, `DeadlineExceeded` or `Canceled`, which OTLP clients retry. The error detail is logged, not sent to the client.
-- **Partial success:** unsupported metric types (histogram, exponential histogram, summary) are not stored; `Export` returns OK with `partial_success.rejected_data_points` and the count per type.
-- **Observability:** domain metrics and logs exported via OTLP or stdout. See [Service metrics and logs](#service-metrics-and-logs).
+Requirements: Go 1.26+ and Docker.
 
-## Requirements
+### Quick demo
 
-- Go 1.26+
-- Docker (for ClickHouse and the integration tests)
-
-## Quick demo
-
-One command runs the whole flow end to end:
 ```shell
-make demo   # or ./scripts/demo.sh
+make demo
 ```
 
 ```text
-telemetrygen ──OTLP gRPC :4317──▶ service ──native :9000──▶ ClickHouse
-                                     │                      catalog, gauge, sum
+telemetrygen ──OTLP gRPC :4317──▶ service ──native protocol :9000──▶ ClickHouse
+                                     │                               catalog, gauge, sum
                                      └──OTLP gRPC :18889──▶ Aspire Dashboard (UI :18888)
 ```
 
-1. Starts ClickHouse and the Aspire Dashboard, and drops the service tables so they are recreated with the current schema.
-2. Builds and starts the service, exporting its own metrics, logs and traces to the dashboard.
-3. Sends 5 Sum and 5 Gauge datapoints for two services (`checkout`, `payments`), plus 5 Histogram datapoints, which are rejected with a partial success.
-4. Prints the Sum and Gauge values stored in ClickHouse.
-5. Prints how to look at the data, and keeps the service running for the dashboard until Ctrl+C.
+The script starts ClickHouse, the Aspire Dashboard (a local OTLP viewer) and the service. It sends Sum and Gauge datapoints for two services, plus Histogram datapoints that the service rejects. Then it prints the stored values. It takes about 15 s. The service keeps running until Ctrl+C, so you can look at its metrics in the dashboard.
 
-It takes about 15 seconds (longer the first time, while `go run` builds `telemetrygen`). The sections below do it by hand.
+### Step by step
 
-## Run locally
-
-Start ClickHouse:
+**1. Start ClickHouse** (and the Aspire Dashboard, to see the service metrics):
 ```shell
-docker compose up -d
+docker compose --profile observability up -d
 ```
 
-Run the application (the tables are created at startup):
+**2. Run the service.** It creates the tables at startup.
 ```shell
-CLICKHOUSE_PASSWORD=dash0 go run .
+make run
 ```
 
 | Flag | Default | Description |
@@ -60,60 +43,112 @@ CLICKHOUSE_PASSWORD=dash0 go run .
 | `-clickhouseDatabase` | `default` | ClickHouse database |
 | `-clickhouseUsername` | `default` | ClickHouse username |
 
-The ClickHouse password is read from the `CLICKHOUSE_PASSWORD` environment variable, so it does not show up in the process list. `docker compose` uses `dash0` unless `CLICKHOUSE_PASSWORD` is set.
+The ClickHouse password comes only from the `CLICKHOUSE_PASSWORD` environment variable, so it never appears in the process list. `make` and `docker compose` default it to `dash0`.
 
-`SIGINT`/`SIGTERM` stop the server gracefully: in-flight `Export` calls complete before the ClickHouse connection is closed.
-
-## Async inserts
-
-The service does not buffer datapoints itself. Every `Export` request inserts its rows straight away, and ClickHouse is asked to batch those inserts on the server (ADR §5.2).
-
-**Why:** ClickHouse creates at least one data part per `INSERT`. With many small `Export` requests, synchronous inserts would create parts faster than the background merges can combine them, and inserts would start failing with `TOO_MANY_PARTS`. An in-service buffer would avoid that, but it adds flush goroutines, backpressure and shutdown handling, and risks losing data if `OK` is returned before the flush (ADR §9).
-
-**How:** the connection sets two settings:
-
-| Setting | Value | Effect |
-| --- | --- | --- |
-| `async_insert` | `1` | ClickHouse collects small inserts in an in-memory buffer and writes them as one part |
-| `wait_for_async_insert` | `1` | The insert, and therefore `Export`, returns only after the buffer has been flushed to disk |
-
-**Guarantee:** `Export` returns `OK` only when the data is persisted. If ClickHouse fails, the client gets an error and retries, so delivery stays at-least-once.
-
-**Cost:** each `Export` can wait up to the server's flush timeout (`async_insert_busy_timeout_ms`) before it returns. This adds latency, not load.
-
-**Check it:** after sending some metrics (see [Try it](#try-it)):
-```sql
-SYSTEM FLUSH LOGS;
-SELECT table, status, count()
-FROM system.asynchronous_insert_log
-GROUP BY table, status;
+To send the service's own telemetry to the dashboard instead of stdout:
+```shell
+OTEL_METRICS_EXPORTER=otlp OTEL_LOGS_EXPORTER=otlp OTEL_TRACES_EXPORTER=otlp \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:18889 OTEL_EXPORTER_OTLP_PROTOCOL=grpc \
+OTEL_METRIC_EXPORT_INTERVAL=5000 \
+make run
 ```
 
-## Try it
-
-Send sample metrics with [`telemetrygen`](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/cmd/telemetrygen), the OpenTelemetry load generator:
+**3. Send metrics** with [`telemetrygen`](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/cmd/telemetrygen):
 ```shell
 go run github.com/open-telemetry/opentelemetry-collector-contrib/cmd/telemetrygen@v0.120.0 metrics \
   --otlp-insecure --otlp-endpoint localhost:4317 \
-  --metrics 5 --workers 2 --metric-type Sum \
-  --otlp-attributes 'service.name="telemetrygen-demo"'
-
-go run github.com/open-telemetry/opentelemetry-collector-contrib/cmd/telemetrygen@v0.120.0 metrics \
-  --otlp-insecure --otlp-endpoint localhost:4317 \
-  --metrics 5 --metric-type Gauge
+  --metrics 5 --metric-type Sum \
+  --otlp-attributes 'service.name="checkout"'
 ```
 
-Inspect what was stored:
+Use `--metric-type Gauge` for gauges. Use `--metric-type Histogram` to see a partial success.
+
+**4. Look at the service metrics** at http://localhost:18888, resource `otlp-metrics-processor-backend` under **Metrics**.
+
+**5. Query the stored data:**
 ```shell
 docker compose exec clickhouse clickhouse-client --password dash0
 ```
 
 ```sql
--- One catalog row per series and day; datapoints only carry MetricHash, time and value
-SELECT Day, MetricHash, ServiceName, MetricName, MetricType, AggregationTemporality, IsMonotonic
+SELECT Day, MetricHash, ServiceName, MetricName, MetricType
 FROM otel_metrics_catalog;
+```
 
--- All Sum values of the last hour: series from the catalog first, then their datapoints (ADR §6)
+More queries in [Access pattern](#access-pattern).
+
+**6. Stop** ClickHouse and the dashboard, and drop their data:
+```shell
+docker compose --profile observability down
+```
+
+## Design in brief
+
+### Schema: catalog + datapoints
+
+A **series** is one metric with one set of Resource and datapoint attributes. The service gives each series a 64-bit `MetricHash`. It hashes the metric name, unit, type, temporality, monotonicity, Resource attributes and `DataPointAttributes`. The series metadata goes to a **catalog** once per day. Datapoints carry only `MetricHash`, time and value.
+
+```mermaid
+%%{init: {"themeVariables": {"edgeLabelBackground": "#eeeeee"}}}%%
+flowchart LR
+    subgraph clickhouse["ClickHouse"]
+        C["otel_metrics_catalog"]
+        G["otel_metrics_gauge"]
+        S["otel_metrics_sum&nbsp;&nbsp;"]
+    end
+    C -->|MetricHash| G
+    C -->|MetricHash| S
+    classDef table fill:#ffffff,stroke:#333333,color:#000000,font-weight:bold
+    class C,G,S table
+    style clickhouse fill:#eeeeee,stroke:none,color:#000000
+    linkStyle default stroke:#555555,color:#000000
+```
+
+- Metadata is stored once per series per day, not once per datapoint.
+- `Day` leads the catalog key, so catalog lookups are bounded by time.
+- Gauge and Sum have separate tables. A query usually targets one type, and each table can evolve on its own.
+- Catalog rows are written before their datapoints, so a datapoint never points to a missing series.
+- Each instance caches the `(Day, MetricHash)` keys it has written and skips them. The cache is updated only after a successful insert. Several instances, or a cache reset, can write the same row twice. `ReplacingMergeTree` merges the duplicates.
+
+### Ingestion
+
+- **Async inserts.** Each `Export` inserts its rows straight away, and ClickHouse batches them on the server (`async_insert=1`). Without it, small inserts create parts faster than ClickHouse merges them, and inserts fail with `TOO_MANY_PARTS`.
+- **At-least-once.** With `wait_for_async_insert=1`, `Export` returns `OK` only after the data is on disk. A client that retries after an error gets at-least-once delivery. The cost is latency: a request can wait up to the server's flush timeout.
+- **Errors.** Storage errors return `Unavailable`, `DeadlineExceeded` or `Canceled`, which OTLP clients retry. The details are logged, not sent to the client.
+- **Partial success.** Histogram, exponential histogram and summary are not stored. `Export` returns `OK` and reports them in `partial_success.rejected_data_points`.
+- **Shutdown.** `SIGINT`/`SIGTERM` stop the server gracefully: in-flight `Export` calls complete first.
+
+### Observability
+
+The service exports metrics, logs and `Export` spans with the OpenTelemetry SDK. It is configured with the standard `OTEL_*` environment variables (stdout when unset).
+
+| Metric (`com.dash0.homeexercise.` prefix) | Attributes | What it tells you |
+| --- | --- | --- |
+| `export.requests` | `outcome` = `success` / `partial_success` / `failure` | Request rate and how requests end |
+| `datapoints.received` | `metric.type` | Inbound volume per metric type |
+| `datapoints.dropped` | `metric.type` | Datapoints of unsupported types |
+| `catalog.cache.lookups` | `result` = `hit` / `miss` | Cache efficiency; misses are new series of the day |
+| `catalog.cache.resets` | — | Cache cleared because it was full |
+| `clickhouse.insert.duration` | `table`, `outcome` | Insert latency (including the async flush) and errors per table |
+| `clickhouse.insert.rows` | `table` | Rows written per table |
+
+## Access pattern
+
+Every read is bounded by time and goes through the catalog first:
+
+```mermaid
+flowchart LR
+    Q["Query<br/>time range + filters"] --> C["otel_metrics_catalog<br/>Day in range<br/>+ metadata filters"]
+    C -->|"MetricHash IN (…)"| D["otel_metrics_gauge / otel_metrics_sum<br/>MetricHash IN (…)<br/>+ TimeUnix in range"]
+    C -->|"metadata, joined on MetricHash"| R["Result<br/>values + series metadata"]
+    D --> R
+```
+
+1. **Catalog:** select the series by metadata (name, service, type, attributes) within the requested days.
+2. **Datapoints:** read only those series, in the exact time range.
+
+```sql
+-- All Sum values of the last hour
 WITH series AS (
     SELECT MetricHash, ServiceName, MetricName
     FROM otel_metrics_catalog
@@ -130,18 +165,26 @@ WHERE d.MetricHash IN (SELECT MetricHash FROM series)
 ORDER BY s.ServiceName, d.TimeUnix;
 ```
 
-## Stop
+- `ORDER BY Day DESC LIMIT 1 BY MetricHash` keeps the latest catalog row per series, without `FINAL`.
+- The daily partitions limit the read to the days in range. `MetricHash IN (…)` then lets the sort key skip the other series. A join alone does not skip them: without the `IN`, the query reads the whole day.
 
-Stop ClickHouse (and the dashboard) and drop their data:
-```shell
-docker compose --profile observability down
-```
+## Performance test
 
-## Evaluating the service
+`make query-plan` checks how the schema serves the access pattern. It creates the tables with the service's DDL in a separate database (`query_plan`). It loads 17.3M rows: 2000 series, one datapoint every 30 s, three days. Then it runs two catalog-first queries over one hour:
 
-How to check that the service is correct, observable and efficient, and what was done to evaluate it.
+1. one metric across all services, per-minute average;
+2. latest value of every series of one service.
 
-### Correctness: tests
+For each query it prints `EXPLAIN indexes = 1` (parts and granules kept by each index) and the actual reads from `system.query_log`. A granule is a block of 8192 rows.
+
+| Query | Partitions read | Granules read (of 704 in the day) | Rows read |
+| --- | --- | --- | --- |
+| One metric, all services (100 series) | 1 of 3 | 133 | 1.11M |
+| One service, all series (200 series) | 1 of 3 | 227 | 1.88M |
+
+The first sort key was `(toStartOfHour(TimeUnix), MetricHash, TimeUnix)`. This script showed that it did not prune: ClickHouse does not match a `TimeUnix` filter to the hour bucket. Both queries read the whole day (about 5.7M rows). The current key `(MetricHash, TimeUnix)` reads 3 to 5 times fewer rows.
+
+## Testing
 
 | Command | Description |
 | --- | --- |
@@ -150,71 +193,23 @@ How to check that the service is correct, observable and efficient, and what was
 | `make test` | Unit tests, no external dependencies |
 | `make test-integration` | Integration tests against a real ClickHouse started with testcontainers (needs Docker) |
 
-- **Unit tests** cover the series identity (`MetricHash` golden values, attribute order and type), the OTLP → row mapping, the catalog cache, and the `Export` write path and status codes against a fake store.
-- **Integration tests** create the schema, insert catalog rows and datapoints, and send an OTLP request through gRPC down to ClickHouse.
+- **Unit tests** cover the series identity (`MetricHash` golden values, attribute order and type), the OTLP → row mapping, the catalog cache, and the `Export` path and status codes against a fake store.
+- **Integration tests** cover the write path end to end: schema creation, catalog and datapoint inserts, and an OTLP request over gRPC down to ClickHouse.
 
-### Service metrics and logs
+## What's missing
 
-The service exports metrics, logs and the `otelgrpc` `Export` spans through the OpenTelemetry SDK. The exporter is chosen with the standard `OTEL_*` environment variables (`OTEL_METRICS_EXPORTER`, `OTEL_LOGS_EXPORTER`, `OTEL_TRACES_EXPORTER`, `OTEL_EXPORTER_OTLP_*`); when they are unset, everything is printed to stdout. Set `OTEL_TRACES_EXPORTER=none` to turn the spans off, or `OTEL_TRACES_SAMPLER` to sample them.
+**Other metric types.** Only Gauge and Sum are stored. Histogram, exponential histogram and summary follow the same pattern: the same catalog and `MetricHash`, plus one datapoint table per type. A few choices are already clear:
 
-| Metric (`com.dash0.homeexercise.` prefix) | Attributes | What it tells you |
-| --- | --- | --- |
-| `export.requests` | `outcome` = `success` / `partial_success` / `failure` | Request rate and how requests end |
-| `datapoints.received` | `metric.type` | Inbound volume per metric type |
-| `datapoints.dropped` | `metric.type` | Datapoints of unsupported types (histogram, exponential histogram, summary) |
-| `catalog.cache.lookups` | `result` = `hit` / `miss` | Cache efficiency; misses are new series per day |
-| `catalog.cache.resets` | — | Cache cleared because it was full; frequent resets mean `maxSize` is too small |
-| `clickhouse.insert.duration` | `table`, `outcome` | Insert latency (including the async insert flush) and errors per table |
-| `clickhouse.insert.rows` | `table` | Rows written per table |
+- Histogram `ExplicitBounds` belong to the series identity and the catalog. They are fixed per series, and a change makes bucket counts incomparable.
+- Exponential histogram `Scale` stays on each datapoint, because SDKs change it at runtime.
+- Optional `Sum`, `Min` and `Max` need `Nullable` columns or a sentinel value.
+- Order: Histogram first (common in OTel semantic conventions, e.g. `http.server.request.duration`), then exponential histogram, then summary.
 
-Questions they answer:
+**Other gaps:**
 
-- *Is the catalog cache working?* `catalog.cache.lookups`: after the first Export of the day, almost all lookups are hits.
-- *Is ClickHouse keeping up?* `clickhouse.insert.duration` per table, and `export.requests` with `outcome=failure`.
-- *Are clients sending data we drop?* `datapoints.dropped` per type, and the matching `Warn` logs.
-
-Logs: `Error` for a failed insert (table, row count, error), `Warn` for rejected unsupported datapoints. `otelgrpc` adds RPC duration and status metrics.
-
-**Watch them locally.** The [Aspire Dashboard](https://learn.microsoft.com/dotnet/aspire/fundamentals/dashboard/standalone) is a single container that receives OTLP and shows metrics and logs. It is behind a compose profile:
-```shell
-docker compose --profile observability up -d
-```
-
-Run the application exporting to it (metrics every 5 seconds):
-```shell
-CLICKHOUSE_PASSWORD=dash0 \
-OTEL_METRICS_EXPORTER=otlp OTEL_LOGS_EXPORTER=otlp OTEL_TRACES_EXPORTER=otlp \
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:18889 OTEL_EXPORTER_OTLP_PROTOCOL=grpc \
-OTEL_METRIC_EXPORT_INTERVAL=5000 \
-go run .
-```
-
-Send data as in [Try it](#try-it), plus a histogram to see `datapoints.dropped` and the partial success response:
-```shell
-go run github.com/open-telemetry/opentelemetry-collector-contrib/cmd/telemetrygen@v0.120.0 metrics \
-  --otlp-insecure --otlp-endpoint localhost:4317 \
-  --metrics 5 --metric-type Histogram
-```
-
-Open http://localhost:18888 and pick the `otlp-metrics-processor-backend` resource under **Metrics**.
-
-### Query performance
-
-`make query-plan` measures how the schema serves typical reads (ADR §4.3). It starts ClickHouse, creates the tables with the service's own DDL in a scratch database (`query_plan`, so `default` is not touched), loads synthetic data (2000 series, one datapoint every 30s for three days, 17.3M rows) and runs two catalog-first queries:
-
-1. one metric across all services, per-minute average over one hour;
-2. latest value of every series of one service over one hour.
-
-For each query it prints the SQL and two measurements:
-
-- **`EXPLAIN indexes = 1`**, per table read: parts and granules kept by each index, in order. `MinMax` and `Partition` drop the days outside the range; `PrimaryKey` drops the granules of other series inside the day.
-- **Execution**, from `system.query_log`: rows and bytes actually read, parts, granules and duration.
-
-This is how the datapoint sort key was chosen. The first version, `(toStartOfHour(TimeUnix), MetricHash, TimeUnix)`, read the whole day for both queries; `(MetricHash, TimeUnix)` reads 3 to 5 times fewer rows:
-
-| Query | Granules read (of 704 in the day) | Rows read |
-| --- | --- | --- |
-| One metric, all services | 693 → **133** | 5.69M → **1.11M** |
-| One service, all series | 704 → **227** | 5.78M → **1.88M** |
-
-Details in ADR §4.3. Rerun the script after any change to the schema and compare the numbers.
+- **Retention.** There is no TTL; all data is kept.
+- **Error classification.** Permanent ClickHouse errors (e.g. `UNKNOWN_TABLE`) are retried like transient ones, until the client gives up.
+- **Deduplication.** Delivery is at-least-once. A retried request can store the same datapoints twice.
+- **Attribute types.** Array, kvlist and bytes attributes are converted with the proto text format, which is not stable. Their `MetricHash` can change between library versions.
+- **Catalog cache.** It is cleared when full. An LRU cache would help if `catalog.cache.resets` is frequent.
+- **Attribute filters.** Frequent filters on attributes would need skip indexes or dedicated columns.
