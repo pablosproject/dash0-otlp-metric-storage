@@ -10,10 +10,6 @@ import (
 
 const fieldSeparator byte = 0xff
 
-// metricHash computes the MetricHash of the series described by a catalog row.
-// Only identity fields are hashed (see ADR §4.1): Scope, schema URLs,
-// MetricDescription and ServiceName are ignored. Changing the encoding changes
-// every MetricHash and splits the history of all series.
 func metricHash(r *CatalogRow) uint64 {
 	b := make([]byte, 0, 256)
 	b = appendString(b, r.MetricName)

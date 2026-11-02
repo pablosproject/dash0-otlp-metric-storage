@@ -2,9 +2,6 @@ package metrics
 
 import "sync"
 
-// catalogCache remembers the (Day, MetricHash) keys already written to the
-// catalog by this instance, so each series is written once per day. When it
-// is full it is cleared entirely.
 type catalogCache struct {
 	mu      sync.Mutex
 	keys    map[catalogKey]struct{}

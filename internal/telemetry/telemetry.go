@@ -1,5 +1,5 @@
-// Package telemetry holds the domain metrics and logs of the OTLP ingest path
-// (ADR §7). Instrument names share the com.dash0.homeexercise. prefix.
+// Package telemetry holds the domain metrics and logs of the OTLP ingest path.
+// Instrument names share the com.dash0.homeexercise. prefix.
 package telemetry
 
 import (
